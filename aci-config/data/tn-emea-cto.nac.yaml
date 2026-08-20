@@ -1,0 +1,125 @@
+---
+apic:
+  tenants:
+    - name: emea-cto
+      managed: false
+      security_domains:
+        - emea-cto
+
+      vrfs:
+        - name: vrf-conmurph-prod
+          
+      bridge_domains:
+        - name: 10.0.10.0_24
+          vrf: vrf-conmurph-prod
+          subnets:
+          - ip: 10.0.10.1/24
+            public: true
+          l3outs:
+            - l3out-to-core-01
+        - name: 10.0.20.0_24
+          vrf: vrf-conmurph-prod
+          subnets:
+          - ip: 10.0.20.1/24
+            public: true
+          l3outs:
+            - l3out-to-core-01
+        - name: 10.0.30.0_24
+          vrf: vrf-conmurph-prod
+          subnets:
+          - ip: 10.0.30.1/24
+            public: true
+          l3outs:
+            - l3out-to-core-01
+
+      application_profiles:
+        - name: security-groups
+          endpoint_security_groups:
+            - name: all-services
+              vrf: vrf-conmurph-prod
+              epg_selectors:
+                - endpoint_group: 10.10.10.0_24
+                  application_profile: network-segments
+                - endpoint_group: 10.10.20.0_24
+                  application_profile: network-segments
+                - endpoint_group: 10.10.30.0_24
+                  application_profile: network-segments
+                
+              contracts:
+                providers:
+                  - permit-all-to-tenant-emea-cto
+
+        - name: network-segments
+          endpoint_groups: 
+            - name: 10.0.10.0_24
+              bridge_domain: 10.0.10.0_24
+              physical_domains:
+                - emea-cto.phys-dom
+              static_ports:
+                - node_id: 1101
+                  node2_id: 1102
+                  channel: vpc-ucs-test-01-6536-A
+                  vlan: 10
+                  deployment_immediacy: immediate
+                - node_id: 1101
+                  node2_id: 1102
+                  channel: vpc-ucs-test-01-6536-B
+                  vlan: 10
+                  deployment_immediacy: immediate
+            - name: 10.0.20.0_24
+              bridge_domain: 10.0.20.0_24
+              physical_domains:
+                - emea-cto.phys-dom
+              static_ports:
+                - node_id: 1101
+                  node2_id: 1102
+                  channel: vpc-ucs-test-01-6536-A
+                  vlan: 20
+                  deployment_immediacy: immediate
+                - node_id: 1101
+                  node2_id: 1102
+                  channel: vpc-ucs-test-01-6536-B
+                  vlan: 20
+                  deployment_immediacy: immediate
+            - name: 10.0.30.0_24
+              bridge_domain: 10.0.30.0_24
+              physical_domains:
+                - emea-cto.phys-dom
+              static_ports:
+                - node_id: 1101
+                  node2_id: 1102
+                  channel: vpc-ucs-test-01-6536-A
+                  vlan: 30
+                  deployment_immediacy: immediate
+                - node_id: 1101
+                  node2_id: 1102
+                  channel: vpc-ucs-test-01-6536-B
+                  vlan: 30
+                  deployment_immediacy: immediate
+
+      filters:
+        - name: icmp
+          entries:
+            - name: icmp
+              ethertype: ip
+              protocol: icmp
+        - name: web
+          entries:
+            - name: http
+              ethertype: ip
+              protocol: tcp
+              destination_from_port: http
+              destination_to_port: http
+        - name: all-protocols
+          entries:
+            - name: any
+              ethertype: unspecified
+
+      contracts:  
+        - name: permit-all-to-tenant-emea-cto
+          subjects:
+            - name: permit-any
+              filters:
+                - filter: all-protocols
+                  log: true
+  
