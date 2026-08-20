@@ -122,4 +122,3 @@ apic:
               filters:
                 - filter: all-protocols
                   log: true
-  
