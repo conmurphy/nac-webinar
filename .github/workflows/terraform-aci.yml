@@ -6,12 +6,15 @@ on:
     paths:
       - '**.tf'
       - '**.tfvars'
+      - '**.yaml'
       - '.github/workflows/terraform-aci.yml'
   pull_request:
     branches: [main]
     paths:
       - '**.tf'
       - '**.tfvars'
+      - '**.yaml'
+      - '.github/workflows/terraform-aci.yml'
   workflow_dispatch:
     inputs:
       action:
