@@ -28,7 +28,7 @@ env:
   TF_INPUT: '0'
   TF_VERSION: '1.15.9'
   WORKING_DIR: aci-config
-  TF_STATE_SCHEMA: aci_nac
+  # TF_STATE_SCHEMA: aci_nac
   TF_DATA_DIR: /home/runner/_work/_tfdata/aci-config
   TF_PLUGIN_CACHE_DIR: /home/runner/_work/_tfcache
 
@@ -95,7 +95,7 @@ jobs:
         run: |
           terraform init -input=false \
             -backend-config="conn_str=${TF_STATE_CONN_STR}" \
-            -backend-config="schema_name=${TF_STATE_SCHEMA}"
+            # -backend-config="schema_name=${TF_STATE_SCHEMA}"
         env:
           TF_STATE_CONN_STR: ${{ secrets.TF_STATE_CONN_STR }}
 
@@ -258,7 +258,7 @@ jobs:
         run: |
           terraform init -input=false \
             -backend-config="conn_str=${TF_STATE_CONN_STR}" \
-            -backend-config="schema_name=${TF_STATE_SCHEMA}"
+            # -backend-config="schema_name=${TF_STATE_SCHEMA}"
         env:
           TF_STATE_CONN_STR: ${{ secrets.TF_STATE_CONN_STR }}
 
