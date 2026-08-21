@@ -31,18 +31,14 @@ concurrency:
 
 env:
   TF_IN_AUTOMATION: 'true'
+  CHECKPOINT_DISABLE: '1'
   TF_INPUT: '0'
   TF_VERSION: '1.12.2'
   WORKING_DIR: aci-config
   TF_STATE_SCHEMA: aci_nac
   TF_DATA_DIR: /home/runner/_work/_tfdata/aci-config
   TF_PLUGIN_CACHE_DIR: /home/runner/_work/_tfcache
-  # uv caches on the RWX PVC so nac-analytics installs once
-  UV_CACHE_DIR: /home/runner/_work/_uvcache
-  UV_TOOL_DIR: /home/runner/_work/_uvtools
-  UV_TOOL_BIN_DIR: /home/runner/_work/_uvbin
-  NAC_ANALYTICS_REF: main          # pin to a commit SHA for reproducibility
-  ND_FAIL_ON: none                 # none | minor | major | critical
+  ND_FAIL_ON: none                 # change to 'major' to make ND a hard gate
 
 permissions:
   contents: read
@@ -51,7 +47,6 @@ permissions:
 jobs:
   # ══════════════════════════════════════════════════════════
   # JOB 1 — Plan + Nexus Dashboard pre-change analysis
-  # Runs on any branch / PR. No approval required
   # ══════════════════════════════════════════════════════════
   plan:
     name: Validate & Plan
@@ -71,25 +66,8 @@ jobs:
 
       - name: Prepare cache dirs
         run: |
-          mkdir -p "$TF_PLUGIN_CACHE_DIR" "$TF_DATA_DIR" \
-                   "$UV_CACHE_DIR" "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR"
-          if [ -d "$TF_DATA_DIR/modules" ]; then
-            echo "module cache: WARM"
-          else
-            echo "module cache: COLD — first init will be slow"
-          fi
-
-      # # Delete this step if Terraform is baked into the runner image
-      # - name: Setup Terraform
-      #   uses: hashicorp/setup-terraform@v3
-      #   with:
-      #     terraform_version: ${{ env.TF_VERSION }}
-      #     terraform_wrapper: false
-
-      - name: Show NaC data files
-        run: |
-          echo "Working directory: $(pwd)"
-          find data -type f \( -name '*.yaml' -o -name '*.yml' \) | sort
+          mkdir -p "$TF_PLUGIN_CACHE_DIR" "$TF_DATA_DIR"
+          [ -d "$TF_DATA_DIR/modules" ] && echo "module cache: WARM" || echo "module cache: COLD"
 
       - name: Verify Tools
         run: |
@@ -98,12 +76,7 @@ jobs:
 
       - name: Init
         run: |
-          : "${TF_STATE_CONN_STR:?TF_STATE_CONN_STR is empty - check environment secrets}"
-          : "${TF_STATE_SCHEMA:?TF_STATE_SCHEMA is empty - check workflow env block}"
-
-          echo "schema: ${TF_STATE_SCHEMA}"
-          echo "data dir: ${TF_DATA_DIR}"
-
+          : "${TF_STATE_CONN_STR:?Missing TF_STATE_CONN_STR}"
           start=$(date +%s)
           terraform init -input=false -reconfigure \
             -backend-config="conn_str=${TF_STATE_CONN_STR}" \
@@ -128,15 +101,9 @@ jobs:
           if [ -f tfplan ]; then
             terraform show -no-color tfplan > tfplan.txt
             terraform show -json    tfplan > plan.json
-          else
-            echo "No plan file produced — plan failed before writing output." > tfplan.txt
-            echo '{}' > plan.json
           fi
 
-          if [ "$code" = "1" ]; then
-            echo "::error::terraform plan failed"
-            exit 1
-          fi
+          [ "$code" = "1" ] && { echo "::error::Terraform Plan Failed"; exit 1; }
           exit 0
         env:
           ACI_URL:      ${{ secrets.APIC_URL }}
@@ -147,33 +114,11 @@ jobs:
       - name: Extract summary line
         id: summary
         run: |
-          line="$(grep -E '^(Plan:|No changes)' tfplan.txt | head -1 || echo 'unknown')"
+          line="unknown"
+          [ -f tfplan.txt ] && line=$(grep -E '^(Plan:|No changes)' tfplan.txt | head -1)
           echo "line=${line}" >> "$GITHUB_OUTPUT"
 
-      # # ---------- Nexus Dashboard ----------
-      # # Delete this step if nac-analytics is baked into the runner image
-      # - name: Install nac-analytics
-      #   run: |
-      #     echo "$UV_TOOL_BIN_DIR" >> "$GITHUB_PATH"
-      #     if [ -x "$UV_TOOL_BIN_DIR/nac-analytics" ]; then
-      #       echo "nac-analytics: cached"
-      #       exit 0
-      #     fi
-      #     command -v uv >/dev/null 2>&1 || {
-      #       curl -LsSf https://astral.sh/uv/install.sh | \
-      #         env UV_INSTALL_DIR="$UV_TOOL_BIN_DIR" sh
-      #       export PATH="$UV_TOOL_BIN_DIR:$PATH"
-      #     }
-      #     uv tool install \
-      #       "git+https://github.com/netascode/nac-analytics.git@${NAC_ANALYTICS_REF}"
-
-      - name: Debug Path and Binary
-        run: |
-          echo "Current PATH: $PATH"
-          echo "Looking for binary in: $UV_TOOL_BIN_DIR"
-          ls -la "$UV_TOOL_BIN_DIR"
-          command -v nac-analytics || echo "Binary NOT found on PATH"
-  
+      # ---------- Nexus Dashboard ----------
       - name: ND doctor
         if: steps.plan.outputs.exitcode == '2'
         run: nac-analytics nd doctor --config nac-analytics.yaml -output text
@@ -189,14 +134,11 @@ jobs:
         run: |
           strategy="${{ github.event.inputs.baseline || 'analyze' }}"
           if [ "$strategy" = "analyze" ]; then
-            echo "Triggering a fresh assurance analysis"
             snap="$(nac-analytics nd analyze --config nac-analytics.yaml)"
           else
-            echo "Using the latest already-collected snapshot"
             snap="$(nac-analytics nd snapshots latest --config nac-analytics.yaml)"
           fi
           echo "snapshot_id=${snap}" >> "$GITHUB_OUTPUT"
-          echo "baseline snapshot: ${snap}"
         env:
           ND_HOST:     ${{ secrets.ND_HOST }}
           ND_USER:     ${{ secrets.ND_USER }}
@@ -214,20 +156,7 @@ jobs:
             --detail full \
             --output markdown \
             --report-file nd-prechange.md
-          code=$?
-          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
-
-          case "$code" in
-            0) echo "ND: PASS — no new anomalies at or above threshold" ;;
-            2) echo "::warning::ND analysis job failed, stopped, or timed out" ;;
-            3) echo "::warning::ND found new anomalies at or above the failure threshold" ;;
-            4) echo "::error::ND rejected the candidate configuration (bad input)" ;;
-            5) echo "::error::ND authentication or authorisation failure" ;;
-            *) echo "::error::ND unexpected error (exit $code)" ;;
-          esac
-
-          [ -f nd-prechange.md ] || \
-            echo "_No Nexus Dashboard report produced (exit $code)._" > nd-prechange.md
+          echo "exitcode=$?" >> "$GITHUB_OUTPUT"
           exit 0
         env:
           ND_HOST:     ${{ secrets.ND_HOST }}
@@ -236,74 +165,46 @@ jobs:
           ND_FABRIC:   ${{ secrets.ND_FABRIC }}
 
       - name: ND compliance
-        id: compliance
         if: steps.plan.outputs.exitcode == '2'
         continue-on-error: true
         run: |
-          nac-analytics nd compliance \
-            --config nac-analytics.yaml \
-            --output markdown \
-            --report-file nd-compliance.md
-          [ -f nd-compliance.md ] || echo "_No compliance report._" > nd-compliance.md
+          nac-analytics nd compliance --config nac-analytics.yaml --output markdown --report-file nd-compliance.md
         env:
           ND_HOST:     ${{ secrets.ND_HOST }}
           ND_USER:     ${{ secrets.ND_USER }}
           ND_PASSWORD: ${{ secrets.ND_PASSWORD }}
           ND_FABRIC:   ${{ secrets.ND_FABRIC }}
 
-      # ---------- Summary: ND output first followed by Terraform ----------
       - name: Build step summary
         if: always()
         run: |
           {
             echo "# ACI Change Analysis"
-            echo ''
-            echo "**Plan:** ${{ steps.summary.outputs.line }}"
-            echo ''
-
-            # ---- Nexus Dashboard section (appears BEFORE the plan) ----
-            if [ "${{ steps.plan.outputs.exitcode }}" = "2" ]; then
-              echo '## 1. Nexus Dashboard pre-change analysis'
-              echo ''
-              echo "Baseline snapshot: \`${{ steps.baseline.outputs.snapshot_id }}\`"
-              echo ''
-              case "${{ steps.prechange.outputs.exitcode }}" in
-                0) echo '✅ **PASS** — no new anomalies at or above `${{ env.ND_FAIL_ON }}`' ;;
-                3) echo '⚠️ **NEW ANOMALIES** detected — review before approving' ;;
-                5) echo '❌ **AUTH FAILURE** — check `ND_USER` / `ND_PASSWORD`' ;;
-                *) echo "❌ **ND analysis did not complete** (exit ${{ steps.prechange.outputs.exitcode }})" ;;
-              esac
-              echo ''
+            echo "**Plan Summary:** ${{ steps.summary.outputs.line }}"
+            
+            if [ -f nd-prechange.md ]; then
+              echo "## 1. Nexus Dashboard Pre-Change"
+              echo "Baseline: \`${{ steps.baseline.outputs.snapshot_id }}\`"
               cat nd-prechange.md
-              echo ''
-              echo '### Compliance'
-              echo ''
-              cat nd-compliance.md
-              echo ''
-              echo '---'
-              echo ''
+              echo "### Compliance"
+              [ -f nd-compliance.md ] && cat nd-compliance.md || echo "_No compliance data._"
+              echo "---"
             fi
 
-            # ---- Terraform section ----
-            echo '## 2. Terraform plan'
-            echo ''
-            if [ "${{ steps.plan.outputs.exitcode }}" = "2" ]; then
-              echo '⚠️ Changes detected — **Apply to APIC** is waiting for approval.'
+            echo "## 2. Terraform Plan"
+            if [ -f tfplan.txt ]; then
+              echo '```hcl'
+              grep -E '^  # ' tfplan.txt | head -50 || echo "(none)"
+              echo '```'
+              echo "<details><summary>Full Plan</summary>"
+              echo ""
+              echo '```hcl'
+              head -c 50000 tfplan.txt
+              echo '```'
+              echo "</details>"
             else
-              echo '✅ No changes. Apply will be skipped.'
+              echo "⚠️ No plan found."
             fi
-            echo ''
-            echo '### Resource changes'
-            echo '```'
-            grep -E '^  # ' tfplan.txt | head -80 || echo '(none)'
-            echo '```'
-            echo ''
-            echo '<details><summary>Full plan output</summary>'
-            echo ''
-            echo '```hcl'
-            head -c 50000 tfplan.txt
-            echo '```'
-            echo '</details>'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload artifacts
@@ -316,96 +217,27 @@ jobs:
             ${{ env.WORKING_DIR }}/tfplan.txt
             ${{ env.WORKING_DIR }}/plan.json
             ${{ env.WORKING_DIR }}/nd-prechange.md
-            ${{ env.WORKING_DIR }}/nd-compliance.md
-            ${{ env.WORKING_DIR }}/prechange-report.xml
-          retention-days: 5
-          if-no-files-found: warn
-
-      - name: Comment on PR
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const dir = process.env.WORKING_DIR;
-            const read = (f, fallback) => {
-              try { return fs.readFileSync(`${dir}/${f}`, 'utf8'); }
-              catch { return fallback; }
-            };
-            let nd   = read('nd-prechange.md', '_No ND report._');
-            let plan = read('tfplan.txt', '_No plan output._');
-            if (nd.length   > 30000) nd   = nd.slice(0, 30000)   + '\n... truncated';
-            if (plan.length > 30000) plan = plan.slice(0, 30000) + '\n... truncated';
-            await github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: [
-                '## ACI Change Analysis',
-                '',
-                '`${{ steps.summary.outputs.line }}`',
-                '',
-                '### 1. Nexus Dashboard pre-change',
-                '',
-                nd,
-                '',
-                '### 2. Terraform plan',
-                '',
-                '<details><summary>Show plan</summary>',
-                '',
-                '```hcl',
-                plan,
-                '```',
-                '</details>'
-              ].join('\n')
-            });
 
   # ══════════════════════════════════════════════════════════
-  # JOB 2 — Apply + post-change delta
-  # main branch only and requires reviewers.
+  # JOB 2 — Apply + post-change delta (Approval Required)
   # ══════════════════════════════════════════════════════════
   apply:
     name: Apply to APIC
     needs: plan
     if: |
       needs.plan.outputs.exitcode == '2' &&
-      github.ref == 'refs/heads/main' &&
-      (github.event_name == 'push' ||
-       (github.event_name == 'workflow_dispatch' && inputs.action == 'apply'))
+      github.ref == 'refs/heads/main'
     runs-on: [self-hosted, openshift, aci]
     environment: aci-tenant-emea-cto
     defaults:
       run:
         working-directory: ${{ env.WORKING_DIR }}
     steps:
-      - name: Approval context
-        run: |
-          echo "Approved plan  : ${{ needs.plan.outputs.summary }}"
-          echo "ND baseline    : ${{ needs.plan.outputs.nd_snapshot }}"
-          echo "ND prechange   : exit ${{ needs.plan.outputs.nd_exitcode }}"
-          echo "Commit         : ${{ github.sha }}"
-          echo "Triggered by   : ${{ github.actor }}"
-
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Prepare cache dirs
-        run: |
-          mkdir -p "$TF_PLUGIN_CACHE_DIR" "$TF_DATA_DIR" \
-                   "$UV_CACHE_DIR" "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR"
-          echo "$UV_TOOL_BIN_DIR" >> "$GITHUB_PATH"
-
-      # Terraform baked into the github runner image so don't need this
-      # - name: Setup Terraform 
-      #   uses: hashicorp/setup-terraform@v3
-      #   with:
-      #     terraform_version: ${{ env.TF_VERSION }}
-      #     terraform_wrapper: false
-
-      - name: Verify Tools
-        run: |
-          terraform version
-          nac-analytics version
+        run: mkdir -p "$TF_PLUGIN_CACHE_DIR" "$TF_DATA_DIR"
 
       - name: Download plan
         uses: actions/download-artifact@v4
@@ -415,17 +247,9 @@ jobs:
 
       - name: Init
         run: |
-          : "${TF_STATE_CONN_STR:?TF_STATE_CONN_STR is empty - check environment secrets}"
-          : "${TF_STATE_SCHEMA:?TF_STATE_SCHEMA is empty - check workflow env block}"
-
-          echo "schema: ${TF_STATE_SCHEMA}"
-          echo "data dir: ${TF_DATA_DIR}"
-
-          start=$(date +%s)
-          terraform init -input=false -reconfigure \
+          terraform init -input=false \
             -backend-config="conn_str=${TF_STATE_CONN_STR}" \
             -backend-config="schema_name=${TF_STATE_SCHEMA}"
-          echo "init took $(( $(date +%s) - start ))s"
         env:
           TF_STATE_CONN_STR: ${{ secrets.TF_STATE_CONN_STR }}
 
@@ -441,20 +265,10 @@ jobs:
         id: delta
         continue-on-error: true
         run: |
-          echo "Triggering a post-change assurance analysis"
+          echo "Triggering post-change analysis..."
           POST="$(nac-analytics nd analyze --config nac-analytics.yaml)"
-          echo "post snapshot: ${POST}"
-
-          set +e
           nac-analytics nd delta "${{ needs.plan.outputs.nd_snapshot }}" "${POST}" \
-            --config nac-analytics.yaml \
-            --detail full \
-            --output markdown \
-            --report-file nd-delta.md
-          code=$?
-          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
-          [ -f nd-delta.md ] || echo "_No delta report (exit $code)._" > nd-delta.md
-          exit 0
+            --config nac-analytics.yaml --detail full --output markdown --report-file nd-delta.md
         env:
           ND_HOST:     ${{ secrets.ND_HOST }}
           ND_USER:     ${{ secrets.ND_USER }}
@@ -465,35 +279,11 @@ jobs:
         if: always()
         run: |
           {
-            echo '# Applied to APIC'
-            echo ''
-            echo "Plan applied: **${{ needs.plan.outputs.summary }}**"
-            echo ''
-            echo '## Nexus Dashboard post-change delta'
-            echo ''
-            case "${{ steps.delta.outputs.exitcode }}" in
-              0) echo '✅ **PASS** — no new anomalies introduced' ;;
-              3) echo '⚠️ **NEW ANOMALIES** introduced by this change' ;;
-              *) echo "ℹ️ Delta exit ${{ steps.delta.outputs.exitcode }}" ;;
-            esac
-            echo ''
-            cat nd-delta.md 2>/dev/null || echo '_none_'
-            echo ''
-            echo '## Terraform outputs'
+            echo "# Apply Results"
+            echo "## Nexus Dashboard Delta"
+            [ -f nd-delta.md ] && cat nd-delta.md || echo "_No delta produced._"
+            echo "## Terraform Outputs"
             echo '```json'
             terraform output -json 2>/dev/null || echo '{}'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-        env:
-          TF_STATE_CONN_STR: ${{ secrets.TF_STATE_CONN_STR }}
-
-      - name: Upload ND delta
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: nd-delta
-          path: |
-            ${{ env.WORKING_DIR }}/nd-delta.md
-            ${{ env.WORKING_DIR }}/delta-report.xml
-          retention-days: 5
-          if-no-files-found: warn
