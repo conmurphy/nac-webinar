@@ -34,6 +34,7 @@ env:
   TF_INPUT: '0'
   TF_VERSION: '1.15.9'
   WORKING_DIR: aci-config
+  TF_STATE_SCHEMA: aci_nac
   TF_DATA_DIR: /home/runner/_work/_tfdata/aci-config
   TF_PLUGIN_CACHE_DIR: /home/runner/_work/_tfcache
   # uv caches on the RWX PVC so nac-analytics installs once
@@ -92,9 +93,16 @@ jobs:
 
       - name: Init
         run: |
+          : "${TF_STATE_CONN_STR:?TF_STATE_CONN_STR is empty - check environment secrets}"
+          : "${TF_STATE_SCHEMA:?TF_STATE_SCHEMA is empty - check workflow env block}"
+
+          echo "schema: ${TF_STATE_SCHEMA}"
+          echo "data dir: ${TF_DATA_DIR}"
+
           start=$(date +%s)
-          terraform init -input=false \
+          terraform init -input=false -reconfigure \
             -backend-config="conn_str=${TF_STATE_CONN_STR}" \
+            -backend-config="schema_name=${TF_STATE_SCHEMA}"
           echo "init took $(( $(date +%s) - start ))s"
         env:
           TF_STATE_CONN_STR: ${{ secrets.TF_STATE_CONN_STR }}
@@ -389,8 +397,17 @@ jobs:
 
       - name: Init
         run: |
-          terraform init -input=false \
+          : "${TF_STATE_CONN_STR:?TF_STATE_CONN_STR is empty - check environment secrets}"
+          : "${TF_STATE_SCHEMA:?TF_STATE_SCHEMA is empty - check workflow env block}"
+
+          echo "schema: ${TF_STATE_SCHEMA}"
+          echo "data dir: ${TF_DATA_DIR}"
+
+          start=$(date +%s)
+          terraform init -input=false -reconfigure \
             -backend-config="conn_str=${TF_STATE_CONN_STR}" \
+            -backend-config="schema_name=${TF_STATE_SCHEMA}"
+          echo "init took $(( $(date +%s) - start ))s"
         env:
           TF_STATE_CONN_STR: ${{ secrets.TF_STATE_CONN_STR }}
 
