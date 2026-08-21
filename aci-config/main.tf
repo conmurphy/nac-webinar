@@ -20,7 +20,7 @@ terraform {
     # conn_str and schema_name supplied via -backend-config at init
   }
 }
-
+ 
 
 provider "aci" {
   # Credentials supplied via ACI_URL / ACI_USERNAME / ACI_PASSWORD
