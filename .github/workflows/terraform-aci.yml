@@ -171,17 +171,17 @@ jobs:
           rc=$?
           set -e
 
-          echo "--- diagnostics ---"
+          echo "--- CLI diagnostics (stderr) ---"
           cat snap.err || true
-          echo "--- raw stdout ---"
-          cat snap.out || true
-          echo "------------------"
+          echo "--------------------------------"
 
-          # The CLI mixes status lines with the ID, so match the ID by shape
-          snap="$(grep -Eho '[0-9a-f]{6,}(-[0-9a-f]{4,}){3,}' snap.out snap.err 2>/dev/null | tail -1)"
+          # The snapshot ID is the ONLY thing on stdout.
+          # Do NOT read stderr - it contains the analysis JOB id, which is
+          # a different identifier and is rejected by prechange/delta.
+          snap="$(tail -n1 snap.out | tr -d '[:space:]')"
 
           if [ -z "$snap" ]; then
-            echo "::warning::No baseline snapshot resolved (rc=${rc}); prechange will default to latest"
+            echo "::warning::No baseline snapshot resolved (rc=${rc}); falling back to 'latest'"
           fi
           echo "snapshot_id=${snap}" >> "$GITHUB_OUTPUT"
           echo "baseline snapshot: ${snap:-<none>}"
@@ -195,7 +195,6 @@ jobs:
         id: prechange
         if: steps.plan.outputs.exitcode == '2'
         run: |
-          # baseline is the SECOND POSITIONAL argument - there is no --baseline flag
           BASELINE="${{ steps.baseline.outputs.snapshot_id }}"
           [ -n "$BASELINE" ] || BASELINE="latest"
           echo "analysing plan.json against baseline: ${BASELINE}"
@@ -209,15 +208,6 @@ jobs:
           code=$?
           echo "exitcode=$code" >> "$GITHUB_OUTPUT"
 
-          case "$code" in
-            0) echo "ND: PASS - no new anomalies at or above threshold" ;;
-            2) echo "::warning::ND analysis job failed, stopped, or timed out" ;;
-            3) echo "::warning::ND found new anomalies at or above the failure threshold" ;;
-            4) echo "::error::ND rejected the candidate configuration (bad input)" ;;
-            5) echo "::error::ND authentication or authorisation failure" ;;
-            *) echo "::error::ND unexpected error (exit $code)" ;;
-          esac
-
           # Strip any preamble the CLI printed before the markdown heading
           if [ -s nd-prechange.md ]; then
             sed -n '/^# /,$p' nd-prechange.md > nd-prechange.clean.md
@@ -225,6 +215,19 @@ jobs:
           else
             echo "_No Nexus Dashboard pre-change report produced (exit ${code})._" > nd-prechange.md
           fi
+
+          case "$code" in
+            0) echo "ND: PASS - no new anomalies at or above threshold" ;;
+            2) echo "::warning::ND analysis job failed, stopped, or timed out" ;;
+            3) echo "::warning::ND found new anomalies at or above the failure threshold" ;;
+            4) echo "::error::ND rejected the candidate configuration (bad input)"
+               exit 1 ;;
+            5) echo "::error::ND authentication or authorisation failure"
+               exit 1 ;;
+            *) echo "::error::ND unexpected error (exit $code)"
+               exit 1 ;;
+          esac
+
           exit 0
         env:
           ND_HOST:     ${{ secrets.ND_HOST }}
@@ -434,8 +437,12 @@ jobs:
           set +e
           nac-analytics nd analyze --output text > post.out 2> post.err
           set -e
+          echo "--- CLI diagnostics (stderr) ---"
           cat post.err || true
-          POST="$(grep -Eho '[0-9a-f]{6,}(-[0-9a-f]{4,}){3,}' post.out post.err 2>/dev/null | tail -1)"
+          echo "--------------------------------"
+
+          # stdout only - stderr carries the analysis job id, not the snapshot id
+          POST="$(tail -n1 post.out | tr -d '[:space:]')"
           echo "post snapshot: ${POST:-<none>}"
 
           PRE="${{ needs.plan.outputs.nd_snapshot }}"
