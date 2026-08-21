@@ -1,0 +1,8 @@
+# nac-analytics configuration
+# host / fabric / credentials are supplied via ND_* environment variables.
+nexus_dashboard:
+  domain: DefaultAuth
+  verify_ssl: false
+  job_timeout_minutes: 30
+  poll_interval: 15
+  delta_detail: full
