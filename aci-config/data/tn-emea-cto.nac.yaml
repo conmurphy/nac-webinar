@@ -33,23 +33,23 @@ apic:
             - l3out-to-core-01
 
       application_profiles:
-        - name: security-groups
+        - name: conmurph-nac-security-groups
           endpoint_security_groups:
             - name: all-services
               vrf: vrf-conmurph-prod
               epg_selectors:
                 - endpoint_group: 10.10.10.0_24
-                  application_profile: network-segments
+                  application_profile: conmurph-nac-network-segments
                 - endpoint_group: 10.10.20.0_24
-                  application_profile: network-segments
+                  application_profile: conmurph-nac-network-segments
                 - endpoint_group: 10.10.30.0_24
-                  application_profile: network-segments
+                  application_profile: conmurph-nac-network-segments
                 
               contracts:
                 providers:
                   - permit-all-to-tenant-emea-cto
 
-        - name: network-segments
+        - name: conmurph-nac-network-segments
           endpoint_groups: 
             - name: 10.0.10.0_24
               bridge_domain: 10.0.10.0_24
@@ -110,16 +110,16 @@ apic:
               protocol: tcp
               destination_from_port: http
               destination_to_port: http
-        - name: all-protocols
+        - name: conmurph-nac-all-protocols
           entries:
             - name: any
               ethertype: unspecified
 
       contracts:  
-        - name: permit-all-to-tenant-emea-cto
+        - name: permit-all-to-conmurph-nac
           subjects:
             - name: permit-any
               filters:
-                - filter: all-protocols
+                - filter: conmurph-nac-all-protocols
                   log: true
   
