@@ -44,7 +44,7 @@ apic:
                   application_profile: conmurph-nac-network-segments
                 - endpoint_group: 10.0.30.0_24
                   application_profile: conmurph-nac-network-segments
-                
+              
               contracts:
                 providers:
                   - permit-all-to-conmurph-nac
