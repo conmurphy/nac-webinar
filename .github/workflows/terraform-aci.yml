@@ -4,17 +4,12 @@ on:
   push:
     branches: [main]
     paths:
-      - '**.tf'
-      - '**.tfvars'
-      - '**.yaml'
+      - 'aci-config/**'
       - '.github/workflows/terraform-aci.yml'
   pull_request:
     branches: [main]
     paths:
-      - '**.tf'
-      - '**.tfvars'
-      - '**.yaml'
-      - '.github/workflows/terraform-aci.yml'
+      - 'aci-config/**'
   workflow_dispatch:
     inputs:
       action:
@@ -22,9 +17,8 @@ on:
         required: true
         default: 'plan'
         type: choice
-        options: [plan, apply, destroy]
+        options: [plan, apply]
 
-# Never let two applies race the same state
 concurrency:
   group: terraform-aci
   cancel-in-progress: false
@@ -32,22 +26,48 @@ concurrency:
 env:
   TF_IN_AUTOMATION: 'true'
   TF_INPUT: '0'
-  TF_VERSION: '1.15.9'
-  TF_VAR_FILE: environments/dev.tfvars
+  TF_VERSION: '1.9.8'
+  WORKING_DIR: aci-config
+  TF_STATE_SCHEMA: aci_nac
 
 permissions:
   contents: read
   pull-requests: write
 
 jobs:
+  # ══════════════════════════════════════════════════════
+  # JOB 1 — Plan
+  # Environment: aci-tenant-emea-cto-plan  (NO reviewers)
+  # Exists only to scope the secrets. Runs immediately.
+  # ══════════════════════════════════════════════════════
   plan:
     name: Validate & Plan
     runs-on: [self-hosted, openshift, aci]
+    environment: aci-tenant-emea-cto-plan
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
     outputs:
       exitcode: ${{ steps.plan.outputs.exitcode }}
+      summary: ${{ steps.summary.outputs.line }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Prepare cache dirs
+        run: mkdir -p "${TF_PLUGIN_CACHE_DIR:-/home/runner/_work/_tfcache}"
+
+      - name: Secret presence check
+        run: |
+          [ -n "${ACI_URL}" ]      && echo "ACI_URL: set"      || echo "ACI_URL: MISSING"
+          [ -n "${ACI_USERNAME}" ] && echo "ACI_USERNAME: set" || echo "ACI_USERNAME: MISSING"
+          [ -n "${ACI_PASSWORD}" ] && echo "ACI_PASSWORD: set" || echo "ACI_PASSWORD: MISSING"
+          [ -n "${TF_STATE_CONN_STR}" ] && echo "TF_STATE_CONN_STR: set" || echo "TF_STATE_CONN_STR: MISSING"
+        env:
+          ACI_URL:      ${{ secrets.APIC_URL }}
+          ACI_USERNAME: ${{ secrets.APIC_USERNAME }}
+          ACI_PASSWORD: ${{ secrets.APIC_PASSWORD }}
+          TF_STATE_CONN_STR: ${{ secrets.TF_STATE_CONN_STR }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -55,14 +75,17 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
-      - name: Format check
-        run: terraform fmt -check -recursive -diff
+      - name: Show NaC data files
+        run: |
+          echo "Working directory: $(pwd)"
+          echo "--- YAML under data/ ---"
+          find data -type f \( -name '*.yaml' -o -name '*.yml' \) | sort
 
       - name: Init
         run: |
           terraform init -input=false \
             -backend-config="conn_str=${TF_STATE_CONN_STR}" \
-            -backend-config="schema_name=aci_dev"
+            -backend-config="schema_name=${TF_STATE_SCHEMA}"
         env:
           TF_STATE_CONN_STR: ${{ secrets.TF_STATE_CONN_STR }}
 
@@ -73,24 +96,53 @@ jobs:
         id: plan
         run: |
           set +e
-          terraform plan -input=false -lock-timeout=120s \
-            -var-file="${TF_VAR_FILE}" \
-            -detailed-exitcode \
+          terraform plan -input=false -lock-timeout=300s \
+            -detailed-exitcode -no-color \
             -out=tfplan
-          echo "exitcode=$?" >> "$GITHUB_OUTPUT"
+          code=$?
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
           terraform show -no-color tfplan > tfplan.txt
+          if [ "$code" = "1" ]; then
+            echo "::error::terraform plan failed"
+            exit 1
+          fi
+          exit 0
         env:
-          TF_VAR_aci_url:      ${{ secrets.ACI_URL }}
-          TF_VAR_aci_username: ${{ secrets.ACI_USERNAME }}
-          TF_VAR_aci_password: ${{ secrets.ACI_PASSWORD }}
+          ACI_URL:      ${{ secrets.APIC_URL }}
+          ACI_USERNAME: ${{ secrets.APIC_USERNAME }}
+          ACI_PASSWORD: ${{ secrets.APIC_PASSWORD }}
+
+      - name: Extract summary line
+        id: summary
+        run: |
+          line="$(grep -E '^(Plan:|No changes)' tfplan.txt | head -1 || echo 'unknown')"
+          echo "line=${line}" >> "$GITHUB_OUTPUT"
 
       - name: Plan summary
         run: |
           {
-            echo "### Terraform Plan"
-            echo '```hcl'
-            grep -E '^(Plan:|No changes|  [~+-])' tfplan.txt | head -60 || true
+            echo "### Terraform Plan — ACI Network as Code"
+            echo ''
+            echo "**${{ steps.summary.outputs.line }}**"
+            echo ''
+            if [ "${{ steps.plan.outputs.exitcode }}" = "2" ]; then
+              echo '⚠️ Changes detected — the **Apply to APIC** job is waiting for approval.'
+              echo 'Review the plan below, then approve on the run page.'
+            else
+              echo '✅ No changes. Apply will be skipped.'
+            fi
+            echo ''
+            echo '#### Resource changes'
             echo '```'
+            grep -E '^  # ' tfplan.txt | head -80 || echo '(none)'
+            echo '```'
+            echo ''
+            echo '<details><summary>Full plan output</summary>'
+            echo ''
+            echo '```hcl'
+            head -c 60000 tfplan.txt
+            echo '```'
+            echo '</details>'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload plan
@@ -98,9 +150,10 @@ jobs:
         with:
           name: tfplan
           path: |
-            tfplan
-            tfplan.txt
+            ${{ env.WORKING_DIR }}/tfplan
+            ${{ env.WORKING_DIR }}/tfplan.txt
           retention-days: 5
+          if-no-files-found: error
 
       - name: Comment plan on PR
         if: github.event_name == 'pull_request'
@@ -108,67 +161,108 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const plan = fs.readFileSync('tfplan.txt', 'utf8');
-            const body = [
-              '#### Terraform Plan',
-              '<details><summary>Show plan</summary>',
-              '',
-              '```hcl',
-              plan.length > 60000 ? plan.slice(0, 60000) + '\n... truncated' : plan,
-              '```',
-              '</details>'
-            ].join('\n');
+            let plan = fs.readFileSync(`${process.env.WORKING_DIR}/tfplan.txt`, 'utf8');
+            if (plan.length > 60000) plan = plan.slice(0, 60000) + '\n... truncated';
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body
+              body: [
+                '#### Terraform Plan (ACI NaC)',
+                '',
+                '`${{ steps.summary.outputs.line }}`',
+                '',
+                '<details><summary>Show plan</summary>',
+                '',
+                '```hcl',
+                plan,
+                '```',
+                '</details>'
+              ].join('\n')
             });
 
-  # apply:
-  #   name: Apply to APIC
-  #   needs: plan
-  #   if: |
-  #     needs.plan.outputs.exitcode == '2' &&
-  #     (github.event_name == 'push' ||
-  #      (github.event_name == 'workflow_dispatch' && inputs.action == 'apply'))
-  #   runs-on: [self-hosted, openshift, aci]
-  #   environment: aci-production        # <-- approval gate fires here
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
+  # ══════════════════════════════════════════════════════
+  # JOB 2 — Apply
+  # Environment: aci-tenant-emea-cto  (REQUIRED REVIEWERS)
+  # Blocks in "Waiting" until approved on the run page.
+  # ══════════════════════════════════════════════════════
+  apply:
+    name: Apply to APIC
+    needs: plan
+    if: |
+      needs.plan.outputs.exitcode == '2' &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && inputs.action == 'apply'))
+    runs-on: [self-hosted, openshift, aci]
+    environment: aci-tenant-emea-cto
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+    steps:
+      - name: Approval context
+        run: |
+          echo "Approved plan : ${{ needs.plan.outputs.summary }}"
+          echo "Commit        : ${{ github.sha }}"
+          echo "Triggered by  : ${{ github.actor }}"
+          echo "Environment   : aci-tenant-emea-cto"
 
-  #     - name: Setup Terraform
-  #       uses: hashicorp/setup-terraform@v3
-  #       with:
-  #         terraform_version: ${{ env.TF_VERSION }}
-  #         terraform_wrapper: false
+      - name: Checkout
+        uses: actions/checkout@v4
 
-  #     - name: Download plan
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         name: tfplan
+      - name: Prepare cache dirs
+        run: mkdir -p "${TF_PLUGIN_CACHE_DIR:-/home/runner/_work/_tfcache}"
 
-  #     - name: Init
-  #       run: |
-  #         terraform init -input=false \
-  #           -backend-config="conn_str=${TF_STATE_CONN_STR}" \
-  #           -backend-config="schema_name=aci_dev"
-  #       env:
-  #         TF_STATE_CONN_STR: ${{ secrets.TF_STATE_CONN_STR }}
+      - name: Secret presence check
+        run: |
+          [ -n "${ACI_URL}" ]      && echo "ACI_URL: set"      || echo "ACI_URL: MISSING"
+          [ -n "${ACI_USERNAME}" ] && echo "ACI_USERNAME: set" || echo "ACI_USERNAME: MISSING"
+          [ -n "${ACI_PASSWORD}" ] && echo "ACI_PASSWORD: set" || echo "ACI_PASSWORD: MISSING"
+          [ -n "${TF_STATE_CONN_STR}" ] && echo "TF_STATE_CONN_STR: set" || echo "TF_STATE_CONN_STR: MISSING"
+        env:
+          ACI_URL:      ${{ secrets.APIC_URL }}
+          ACI_USERNAME: ${{ secrets.APIC_USERNAME }}
+          ACI_PASSWORD: ${{ secrets.APIC_PASSWORD }}
+          TF_STATE_CONN_STR: ${{ secrets.TF_STATE_CONN_STR }}
 
-  #     - name: Apply
-  #       run: terraform apply -input=false -auto-approve -lock-timeout=120s tfplan
-  #       env:
-  #         TF_VAR_aci_url:      ${{ secrets.ACI_URL }}
-  #         TF_VAR_aci_username: ${{ secrets.ACI_USERNAME }}
-  #         TF_VAR_aci_password: ${{ secrets.ACI_PASSWORD }}
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
-  #     - name: Outputs
-  #       run: |
-  #         {
-  #           echo "### Applied"
-  #           echo '```json'
-  #           terraform output -json
-  #           echo '```'
-  #         } >> "$GITHUB_STEP_SUMMARY"
+      - name: Download plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ env.WORKING_DIR }}
+
+      - name: Init
+        run: |
+          terraform init -input=false \
+            -backend-config="conn_str=${TF_STATE_CONN_STR}" \
+            -backend-config="schema_name=${TF_STATE_SCHEMA}"
+        env:
+          TF_STATE_CONN_STR: ${{ secrets.TF_STATE_CONN_STR }}
+
+      - name: Apply
+        run: |
+          terraform apply -input=false -auto-approve -lock-timeout=300s tfplan
+        env:
+          ACI_URL:      ${{ secrets.APIC_URL }}
+          ACI_USERNAME: ${{ secrets.APIC_USERNAME }}
+          ACI_PASSWORD: ${{ secrets.APIC_PASSWORD }}
+
+      - name: Outputs
+        if: always()
+        run: |
+          {
+            echo '### Applied to APIC'
+            echo ''
+            echo "Plan applied: **${{ needs.plan.outputs.summary }}**"
+            echo ''
+            echo '```json'
+            terraform output -json 2>/dev/null || echo '{}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          TF_STATE_CONN_STR: ${{ secrets.TF_STATE_CONN_STR }}

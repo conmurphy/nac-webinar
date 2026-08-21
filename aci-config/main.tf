@@ -1,16 +1,24 @@
 terraform {
+  required_version = ">= 1.5.0"
+
   required_providers {
     aci = {
-      source = "CiscoDevNet/aci"
+      source  = "CiscoDevNet/aci"
       version = ">=2.13.2"
     }
   }
+
+   backend "pg" {
+    # conn_str and schema_name supplied via -backend-config at init
+  }
 }
 
+
+
 provider "aci" {
-  username = var.apic_username
-  password = var.apic_password
-  url      = var.apic_url
+  # Credentials supplied via ACI_URL / ACI_USERNAME / ACI_PASSWORD
+  insecure = true
+  retries  = 5
 }
 
 module "aci" {
