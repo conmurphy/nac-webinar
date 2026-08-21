@@ -49,9 +49,7 @@ env:
   ND_DELTA_FAIL_ON: 'critical,major'
   ND_JOB_TIMEOUT_MINUTES: '30'
   ND_POLL_INTERVAL: '15'
-  # Deep link into the ND UI. Built from the variable, not the report, because
-  # the report content is subject to masking if the host is ever a secret.
-  ND_PRECHANGE_UI_PATH: '/appcenter/cisco/nexus-insights/ui/#/changeManagement/preChangeAnalysis'
+  ND_PRECHANGE_UI_PATH: '/analysis-hub/pre-change-analysis/view'
 
 permissions:
   contents: read
@@ -305,7 +303,13 @@ jobs:
               echo ''
               echo "Baseline snapshot: \`${{ steps.baseline.outputs.snapshot_id || 'latest' }}\`"
               echo ''
-              echo "🔗 [Open pre-change analysis in Nexus Dashboard](https://${{ vars.ND_HOST }}${{ env.ND_PRECHANGE_UI_PATH }})"
+              JOB="${{ steps.prechange.outputs.job_id }}"
+              if [ -n "$JOB" ]; then
+                echo "🔗 [Open this pre-change analysis in Nexus Dashboard](https://${{ vars.ND_HOST }}${{ env.ND_PRECHANGE_UI_PATH }}/${{ vars.ND_FABRIC }}/${JOB})"
+              else
+                echo "🔗 [Open Nexus Dashboard analysis hub](https://${{ vars.ND_HOST }}/analysis-hub/pre-change-analysis)"
+              fi
+              echo ''
               echo ''
               if [ "${CRIT:-0}" = "0" ] && [ "${MAJ:-0}" = "0" ]; then
                 echo '✅ **No new critical or major anomalies predicted** for this change.'
@@ -376,6 +380,13 @@ jobs:
       - name: Comment on PR
         if: always() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
+        env:
+          ND_HOST:      ${{ vars.ND_HOST }}
+          ND_FABRIC:    ${{ vars.ND_FABRIC }}
+          ND_JOB_ID:    ${{ steps.prechange.outputs.job_id }}
+          ND_CRITICAL:  ${{ steps.prechange.outputs.critical }}
+          ND_MAJOR:     ${{ steps.prechange.outputs.major }}
+          PLAN_SUMMARY: ${{ steps.summary.outputs.line }}
         with:
           script: |
             const fs = require('fs');
@@ -384,43 +395,73 @@ jobs:
               try { return fs.readFileSync(`${dir}/${f}`, 'utf8'); }
               catch { return fallback; }
             };
+
             let nd   = read('nd-prechange.md', '_No ND report._');
             let plan = read('tfplan.txt', '_No plan output._');
             if (nd.length   > 30000) nd   = nd.slice(0, 30000)   + '\n... truncated';
             if (plan.length > 30000) plan = plan.slice(0, 30000) + '\n... truncated';
-            const crit = '${{ steps.prechange.outputs.critical }}' || '0';
-            const maj  = '${{ steps.prechange.outputs.major }}'    || '0';
+
+            const crit    = process.env.ND_CRITICAL || '0';
+            const maj     = process.env.ND_MAJOR    || '0';
+            const host    = process.env.ND_HOST     || '';
+            const fabric  = process.env.ND_FABRIC   || '';
+            const jobId   = process.env.ND_JOB_ID   || '';
+            const planSum = process.env.PLAN_SUMMARY || 'unknown';
+
             const verdict = (crit === '0' && maj === '0')
               ? '✅ No new critical or major anomalies predicted.'
               : `⚠️ Predicted to introduce ${crit} critical and ${maj} major anomalies.`;
+
+            // Deep link to this specific analysis; fall back to the hub if the
+            // job never reached ND (prechange failed before submission).
+            const ndLink = (host && fabric && jobId)
+              ? `🔗 [View this analysis in Nexus Dashboard](https://${host}/analysis-hub/pre-change-analysis/view/${fabric}/${jobId})`
+              : (host
+                  ? `🔗 [Nexus Dashboard analysis hub](https://${host}/analysis-hub/pre-change-analysis)`
+                  : '');
+
+            const body = [
+              '## ACI Change Analysis',
+              '',
+              '`' + planSum + '`',
+              '',
+              '### 1. Nexus Dashboard pre-change',
+              '',
+              verdict,
+            ];
+
+            if (ndLink) {
+              body.push('', ndLink);
+            }
+
+            body.push(
+              '',
+              '| severity | new |',
+              '| --- | --- |',
+              `| critical | ${crit} |`,
+              `| major | ${maj} |`,
+              '',
+              '<details><summary>Full ND report</summary>',
+              '',
+              nd,
+              '',
+              '</details>',
+              '',
+              '### 2. Terraform plan',
+              '',
+              '<details><summary>Show plan</summary>',
+              '',
+              '```hcl',
+              plan,
+              '```',
+              '</details>'
+            );
+
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: [
-                '## ACI Change Analysis',
-                '',
-                '`${{ steps.summary.outputs.line }}`',
-                '',
-                '### 1. Nexus Dashboard pre-change',
-                '',
-                verdict,
-                '',
-                '<details><summary>Full ND report</summary>',
-                '',
-                nd,
-                '',
-                '</details>',
-                '',
-                '### 2. Terraform plan',
-                '',
-                '<details><summary>Show plan</summary>',
-                '',
-                '```hcl',
-                plan,
-                '```',
-                '</details>'
-              ].join('\n')
+              body: body.join('\n')
             });
 
   # ══════════════════════════════════════════════════════════
@@ -578,7 +619,12 @@ jobs:
             echo ''
             echo "Pre-change prediction: ${{ needs.plan.outputs.nd_critical }} critical, ${{ needs.plan.outputs.nd_major }} major"
             echo ''
-            echo "🔗 [Pre-change analysis in Nexus Dashboard](https://${{ vars.ND_HOST }}${{ env.ND_PRECHANGE_UI_PATH }})"
+            JOB="${{ needs.plan.outputs.nd_job_id }}"
+            if [ -n "$JOB" ]; then
+              echo "🔗 [Pre-change analysis in Nexus Dashboard](https://${{ vars.ND_HOST }}${{ env.ND_PRECHANGE_UI_PATH }}/${{ vars.ND_FABRIC }}/${JOB})"
+            else
+              echo "🔗 [Nexus Dashboard analysis hub](https://${{ vars.ND_HOST }}/analysis-hub/pre-change-analysis)"
+            fi
             echo ''
             echo '## Nexus Dashboard post-change delta'
             echo ''
