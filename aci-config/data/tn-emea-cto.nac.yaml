@@ -12,7 +12,7 @@ apic:
       bridge_domains:
         - name: 10.0.10.0_24
           vrf: vrf-conmurph-prod
-          unicast_routing: true
+          unicast_routing: false
           subnets:
           - ip: 10.0.10.1/24
             public: true
