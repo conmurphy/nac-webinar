@@ -19,7 +19,7 @@ on:
         type: choice
         options: [plan, apply]
       baseline:
-        description: 'ND baseline: latest is instant, analyze runs a real job'
+        description: 'ND baseline: latest is instant, analyze runs a real job (~7 min)'
         required: true
         default: 'latest'
         type: choice
@@ -43,7 +43,10 @@ env:
   ND_VERIFY_SSL: 'false'
   # This cluster advertises LDAP and local; the CLI default DefaultAuth 401s.
   ND_DOMAIN: local
-  ND_FAIL_ON: none            # none | critical,major | major ...
+  # Pre-change gate: 'none' reports only. Use 'critical,major' to block the apply.
+  ND_FAIL_ON: none
+  # Post-change delta is informational; leave as none.
+  ND_DELTA_FAIL_ON: none
   ND_JOB_TIMEOUT_MINUTES: '30'
   ND_POLL_INTERVAL: '15'
 
@@ -68,6 +71,8 @@ jobs:
       summary:     ${{ steps.summary.outputs.line }}
       nd_snapshot: ${{ steps.baseline.outputs.snapshot_id }}
       nd_exitcode: ${{ steps.prechange.outputs.exitcode }}
+      nd_job_id:   ${{ steps.prechange.outputs.job_id }}
+      nd_ui_url:   ${{ steps.prechange.outputs.ui_url }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -176,8 +181,8 @@ jobs:
           echo "--------------------------------"
 
           # The snapshot ID is the ONLY thing on stdout.
-          # Do NOT read stderr - it contains the analysis JOB id, which is
-          # a different identifier and is rejected by prechange/delta.
+          # Do NOT read stderr - it contains the analysis JOB id, which is a
+          # different identifier and is rejected by prechange/delta.
           snap="$(tail -n1 snap.out | tr -d '[:space:]')"
 
           if [ -z "$snap" ]; then
@@ -199,35 +204,45 @@ jobs:
           [ -n "$BASELINE" ] || BASELINE="latest"
           echo "analysing plan.json against baseline: ${BASELINE}"
 
+          # NOTE: --report-file applies to JUnit output only.
+          # With --output markdown the report is written to STDOUT.
           set +e
           nac-analytics nd prechange plan.json "$BASELINE" \
             --fail-on "${ND_FAIL_ON}" \
             --detail full \
             --output markdown \
-            --report-file nd-prechange.md
+            > prechange.raw 2> prechange.err
           code=$?
+          set -e
+
+          echo "--- CLI diagnostics (stderr) ---"
+          cat prechange.err || true
+          echo "--------------------------------"
+          cat prechange.raw || true
+
           echo "exitcode=$code" >> "$GITHUB_OUTPUT"
 
-          # Strip any preamble the CLI printed before the markdown heading
-          if [ -s nd-prechange.md ]; then
-            sed -n '/^# /,$p' nd-prechange.md > nd-prechange.clean.md
-            [ -s nd-prechange.clean.md ] && mv nd-prechange.clean.md nd-prechange.md
-          else
+          # Trim any preamble before the first markdown heading
+          sed -n '/^# /,$p' prechange.raw > nd-prechange.md || true
+          [ -s nd-prechange.md ] || \
             echo "_No Nexus Dashboard pre-change report produced (exit ${code})._" > nd-prechange.md
-          fi
+
+          # Pull job_id and the ND UI link out of the markdown table
+          job_id="$(awk -F'|' '$2 ~ /^ *job_id *$/ {gsub(/^ +| +$/,"",$3); print $3; exit}' nd-prechange.md)"
+          ui_url="$(awk -F'|' '$2 ~ /^ *prechange_ui_url *$/ {gsub(/^ +| +$/,"",$3); print $3; exit}' nd-prechange.md)"
+          echo "job_id=${job_id}" >> "$GITHUB_OUTPUT"
+          echo "ui_url=${ui_url}" >> "$GITHUB_OUTPUT"
+          echo "job_id: ${job_id:-<none>}"
+          echo "ui_url: ${ui_url:-<none>}"
 
           case "$code" in
-            0) echo "ND: PASS - no new anomalies at or above threshold" ;;
+            0) echo "ND: completed" ;;
             2) echo "::warning::ND analysis job failed, stopped, or timed out" ;;
             3) echo "::warning::ND found new anomalies at or above the failure threshold" ;;
-            4) echo "::error::ND rejected the candidate configuration (bad input)"
-               exit 1 ;;
-            5) echo "::error::ND authentication or authorisation failure"
-               exit 1 ;;
-            *) echo "::error::ND unexpected error (exit $code)"
-               exit 1 ;;
+            4) echo "::error::ND rejected the candidate configuration (bad input)"; exit 1 ;;
+            5) echo "::error::ND authentication or authorisation failure"; exit 1 ;;
+            *) echo "::error::ND unexpected error (exit $code)"; exit 1 ;;
           esac
-
           exit 0
         env:
           ND_HOST:     ${{ secrets.ND_HOST }}
@@ -235,13 +250,31 @@ jobs:
           ND_PASSWORD: ${{ secrets.ND_PASSWORD }}
           ND_FABRIC:   ${{ secrets.ND_FABRIC }}
 
+      # Optional: fetch the same completed analysis as JUnit for archival.
+      # Uses --job-id so ND does NOT re-run the analysis.
+      - name: ND JUnit report
+        if: steps.prechange.outputs.job_id != ''
+        continue-on-error: true
+        run: |
+          nac-analytics nd prechange \
+            --job-id "${{ steps.prechange.outputs.job_id }}" \
+            --fail-on none \
+            --output junit \
+            --report-file prechange-report.xml
+        env:
+          ND_HOST:     ${{ secrets.ND_HOST }}
+          ND_USER:     ${{ secrets.ND_USER }}
+          ND_PASSWORD: ${{ secrets.ND_PASSWORD }}
+          ND_FABRIC:   ${{ secrets.ND_FABRIC }}
+
+      # NOTE: the prechange report above already contains a Compliance section
+      # with the same figures. This standalone step is redundant - remove it if
+      # you want a tighter summary.
       - name: ND compliance
         id: compliance
         if: steps.plan.outputs.exitcode == '2'
         continue-on-error: true
         run: |
-          # compliance has NO --report-file, and prints status lines before the
-          # markdown, so capture stdout and trim to the first heading onward.
           set +e
           nac-analytics nd compliance --output markdown > compliance.raw 2> compliance.err
           set -e
@@ -269,16 +302,24 @@ jobs:
               echo ''
               echo "Baseline snapshot: \`${{ steps.baseline.outputs.snapshot_id || 'latest' }}\`"
               echo ''
-              case "${{ steps.prechange.outputs.exitcode }}" in
-                0) echo '✅ **PASS** - no new anomalies at or above `${{ env.ND_FAIL_ON }}`' ;;
-                3) echo '⚠️ **NEW ANOMALIES** predicted - review before approving' ;;
-                5) echo '❌ **AUTH FAILURE** - check ND credentials and domain' ;;
-                *) echo "ℹ️ ND exit ${{ steps.prechange.outputs.exitcode }}" ;;
-              esac
+              if [ -n "${{ steps.prechange.outputs.ui_url }}" ]; then
+                echo '🔗 [Open this analysis in Nexus Dashboard](${{ steps.prechange.outputs.ui_url }})'
+                echo ''
+              fi
+              if [ "${{ env.ND_FAIL_ON }}" = "none" ]; then
+                echo 'ℹ️ **REPORT ONLY** — `--fail-on none`, so ND did not gate this change.'
+                echo 'The anomaly counts below are informational.'
+              else
+                case "${{ steps.prechange.outputs.exitcode }}" in
+                  0) echo '✅ **PASS** — no new anomalies at or above `${{ env.ND_FAIL_ON }}`' ;;
+                  3) echo '⚠️ **FAIL** — new anomalies at or above `${{ env.ND_FAIL_ON }}`' ;;
+                  *) echo "❌ ND did not complete (exit ${{ steps.prechange.outputs.exitcode }})" ;;
+                esac
+              fi
               echo ''
               cat nd-prechange.md
               echo ''
-              echo '<details><summary>Fabric compliance</summary>'
+              echo '<details><summary>Standalone fabric compliance</summary>'
               echo ''
               cat nd-compliance.md 2>/dev/null || echo '_none_'
               echo ''
@@ -392,6 +433,7 @@ jobs:
           echo "Approved plan : ${{ needs.plan.outputs.summary }}"
           echo "ND baseline   : ${{ needs.plan.outputs.nd_snapshot }}"
           echo "ND prechange  : exit ${{ needs.plan.outputs.nd_exitcode }}"
+          echo "ND job id     : ${{ needs.plan.outputs.nd_job_id }}"
           echo "Commit        : ${{ github.sha }}"
           echo "Triggered by  : ${{ github.actor }}"
 
@@ -433,7 +475,9 @@ jobs:
         id: delta
         continue-on-error: true
         run: |
-          echo "Triggering post-change assurance analysis"
+          # A fresh snapshot is required here. 'snapshots latest' would race ND's
+          # own 2-4h collection cycle and could return the PRE-change state.
+          echo "Triggering post-change assurance analysis (this takes several minutes)"
           set +e
           nac-analytics nd analyze --output text > post.out 2> post.err
           set -e
@@ -441,7 +485,7 @@ jobs:
           cat post.err || true
           echo "--------------------------------"
 
-          # stdout only - stderr carries the analysis job id, not the snapshot id
+          # stdout only - stderr carries the analysis JOB id, not the snapshot id
           POST="$(tail -n1 post.out | tr -d '[:space:]')"
           echo "post snapshot: ${POST:-<none>}"
 
@@ -453,21 +497,35 @@ jobs:
             exit 0
           fi
 
+          # Same as prechange: markdown goes to STDOUT, --report-file is JUnit only
           set +e
           nac-analytics nd delta "$PRE" "$POST" \
-            --fail-on none \
+            --fail-on "${ND_DELTA_FAIL_ON}" \
             --detail full \
             --output markdown \
-            --report-file nd-delta.md
+            > delta.raw 2> delta.err
           code=$?
+          set -e
+
+          echo "--- CLI diagnostics (stderr) ---"
+          cat delta.err || true
+          echo "--------------------------------"
+          cat delta.raw || true
+
           echo "exitcode=$code" >> "$GITHUB_OUTPUT"
 
-          if [ -s nd-delta.md ]; then
-            sed -n '/^# /,$p' nd-delta.md > nd-delta.clean.md
-            [ -s nd-delta.clean.md ] && mv nd-delta.clean.md nd-delta.md
-          else
+          sed -n '/^# /,$p' delta.raw > nd-delta.md || true
+          [ -s nd-delta.md ] || \
             echo "_No delta report produced (exit ${code})._" > nd-delta.md
-          fi
+
+          case "$code" in
+            0) echo "ND delta: completed" ;;
+            2) echo "::warning::ND delta job failed, stopped, or timed out" ;;
+            3) echo "::warning::ND delta found new anomalies at or above the threshold" ;;
+            4) echo "::error::ND rejected the delta request (bad input)" ;;
+            5) echo "::error::ND authentication or authorisation failure" ;;
+            *) echo "::warning::ND delta unexpected exit ${code}" ;;
+          esac
           exit 0
         env:
           ND_HOST:     ${{ secrets.ND_HOST }}
@@ -483,14 +541,22 @@ jobs:
             echo ''
             echo "Plan applied: **${{ needs.plan.outputs.summary }}**"
             echo ''
+            if [ -n "${{ needs.plan.outputs.nd_ui_url }}" ]; then
+              echo '🔗 [Pre-change analysis in Nexus Dashboard](${{ needs.plan.outputs.nd_ui_url }})'
+              echo ''
+            fi
             echo '## Nexus Dashboard post-change delta'
             echo ''
-            case "${{ steps.delta.outputs.exitcode }}" in
-              0)       echo '✅ **PASS** - no new anomalies introduced' ;;
-              3)       echo '⚠️ **NEW ANOMALIES** introduced by this change' ;;
-              skipped) echo 'ℹ️ Delta skipped - snapshot ID unavailable' ;;
-              *)       echo "ℹ️ Delta exit ${{ steps.delta.outputs.exitcode }}" ;;
-            esac
+            if [ "${{ env.ND_DELTA_FAIL_ON }}" = "none" ]; then
+              echo 'ℹ️ **REPORT ONLY** — `--fail-on none`; counts below are informational.'
+            else
+              case "${{ steps.delta.outputs.exitcode }}" in
+                0)       echo '✅ **PASS** — no new anomalies at or above `${{ env.ND_DELTA_FAIL_ON }}`' ;;
+                3)       echo '⚠️ **NEW ANOMALIES** introduced by this change' ;;
+                skipped) echo 'ℹ️ Delta skipped - snapshot ID unavailable' ;;
+                *)       echo "ℹ️ Delta exit ${{ steps.delta.outputs.exitcode }}" ;;
+              esac
+            fi
             echo ''
             cat nd-delta.md 2>/dev/null || echo '_none_'
             echo ''
@@ -509,6 +575,6 @@ jobs:
           name: nd-delta
           path: |
             ${{ env.WORKING_DIR }}/nd-delta.md
-            ${{ env.WORKING_DIR }}/delta-report.xml
+            ${{ env.WORKING_DIR }}/delta.raw
           retention-days: 5
           if-no-files-found: warn
