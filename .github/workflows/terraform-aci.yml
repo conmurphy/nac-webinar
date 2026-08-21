@@ -244,25 +244,25 @@ jobs:
         env:
           TF_STATE_CONN_STR: ${{ secrets.TF_STATE_CONN_STR }}
 
-      - name: Apply
-        run: |
-          terraform apply -input=false -auto-approve -lock-timeout=300s tfplan
-        env:
-          ACI_URL:      ${{ secrets.APIC_URL }}
-          ACI_USERNAME: ${{ secrets.APIC_USERNAME }}
-          ACI_PASSWORD: ${{ secrets.APIC_PASSWORD }}
+      # - name: Apply
+      #   run: |
+      #     terraform apply -input=false -auto-approve -lock-timeout=300s tfplan
+      #   env:
+      #     ACI_URL:      ${{ secrets.APIC_URL }}
+      #     ACI_USERNAME: ${{ secrets.APIC_USERNAME }}
+      #     ACI_PASSWORD: ${{ secrets.APIC_PASSWORD }}
 
-      - name: Outputs
-        if: always()
-        run: |
-          {
-            echo '### Applied to APIC'
-            echo ''
-            echo "Plan applied: **${{ needs.plan.outputs.summary }}**"
-            echo ''
-            echo '```json'
-            terraform output -json 2>/dev/null || echo '{}'
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-        env:
-          TF_STATE_CONN_STR: ${{ secrets.TF_STATE_CONN_STR }}
+      # - name: Outputs
+      #   if: always()
+      #   run: |
+      #     {
+      #       echo '### Applied to APIC'
+      #       echo ''
+      #       echo "Plan applied: **${{ needs.plan.outputs.summary }}**"
+      #       echo ''
+      #       echo '```json'
+      #       terraform output -json 2>/dev/null || echo '{}'
+      #       echo '```'
+      #     } >> "$GITHUB_STEP_SUMMARY"
+      #   env:
+      #     TF_STATE_CONN_STR: ${{ secrets.TF_STATE_CONN_STR }}
