@@ -91,6 +91,11 @@ jobs:
           echo "Working directory: $(pwd)"
           find data -type f \( -name '*.yaml' -o -name '*.yml' \) | sort
 
+      - name: Verify Tools
+        run: |
+          terraform version
+          nac-analytics version
+
       - name: Init
         run: |
           : "${TF_STATE_CONN_STR:?TF_STATE_CONN_STR is empty - check environment secrets}"
@@ -162,6 +167,13 @@ jobs:
       #     uv tool install \
       #       "git+https://github.com/netascode/nac-analytics.git@${NAC_ANALYTICS_REF}"
 
+      - name: Debug Path and Binary
+        run: |
+          echo "Current PATH: $PATH"
+          echo "Looking for binary in: $UV_TOOL_BIN_DIR"
+          ls -la "$UV_TOOL_BIN_DIR"
+          command -v nac-analytics || echo "Binary NOT found on PATH"
+  
       - name: ND doctor
         if: steps.plan.outputs.exitcode == '2'
         run: nac-analytics nd doctor --config nac-analytics.yaml -output text
@@ -383,11 +395,17 @@ jobs:
                    "$UV_CACHE_DIR" "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR"
           echo "$UV_TOOL_BIN_DIR" >> "$GITHUB_PATH"
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-          terraform_wrapper: false
+      # Terraform baked into the github runner image so don't need this
+      # - name: Setup Terraform 
+      #   uses: hashicorp/setup-terraform@v3
+      #   with:
+      #     terraform_version: ${{ env.TF_VERSION }}
+      #     terraform_wrapper: false
+
+      - name: Verify Tools
+        run: |
+          terraform version
+          nac-analytics version
 
       - name: Download plan
         uses: actions/download-artifact@v4
