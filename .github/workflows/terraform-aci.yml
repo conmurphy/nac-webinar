@@ -108,9 +108,9 @@ jobs:
           fi
           exit 0
         env:
-          ACI_URL:      ${{ secrets.APIC_URL }}
-          ACI_USERNAME: ${{ secrets.APIC_USERNAME }}
-          ACI_PASSWORD: ${{ secrets.APIC_PASSWORD }}
+          TF_VAR_ACI_URL:      ${{ secrets.APIC_URL }}
+          TF_VAR_ACI_USERNAME: ${{ secrets.APIC_USERNAME }}
+          TF_VAR_ACI_PASSWORD: ${{ secrets.APIC_PASSWORD }}
 
       - name: Extract summary line
         id: summary
