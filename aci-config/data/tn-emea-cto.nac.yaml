@@ -38,16 +38,16 @@ apic:
             - name: all-services
               vrf: vrf-conmurph-prod
               epg_selectors:
-                - endpoint_group: 10.10.10.0_24
+                - endpoint_group: 10.0.10.0_24
                   application_profile: conmurph-nac-network-segments
-                - endpoint_group: 10.10.20.0_24
+                - endpoint_group: 10.0.20.0_24
                   application_profile: conmurph-nac-network-segments
-                - endpoint_group: 10.10.30.0_24
+                - endpoint_group: 10.0.30.0_24
                   application_profile: conmurph-nac-network-segments
                 
               contracts:
                 providers:
-                  - permit-all-to-tenant-emea-cto
+                  - permit-all-to-conmurph-nac
 
         - name: conmurph-nac-network-segments
           endpoint_groups: 
