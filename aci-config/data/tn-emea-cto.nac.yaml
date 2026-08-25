@@ -8,7 +8,7 @@ apic:
 
       vrfs:
         - name: vrf-conmurph-prod
-        - name: vrf-conmurph-prod
+        # - name: vrf-conmurph-prod
           
       bridge_domains:
         - name: 10.0.10.0_24
