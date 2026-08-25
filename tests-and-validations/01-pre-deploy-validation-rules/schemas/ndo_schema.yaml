@@ -1,0 +1,836 @@
+---
+ndo: include('ndo', required=False)
+defaults: any(required=False)
+---
+ndo:
+  version: str(required=False)
+  system_config: include('system_config', required=False)
+  remote_locations: list(include('remote_locations'), required=False)
+  sites: list(include('sites'), required=False) # @ref_name(Site)
+  fabric_connectivity: include('fabric_connectivity', required=False)
+  tenants: list(include('tenants'), required=False) # @ref_name(Tenant)
+  schemas: list(include('schemas'), required=False) # @ref_name(Schema)
+  tenant_templates: include('tenant_templates', required=False) # @ref_name(Tenant Template)
+  fabric_templates: include('fabric_templates', required=False) # @ref_name(Fabric Template)
+  undeploy_order: bool(required=False)
+
+system_config:
+  banner: include('sc_banner', required=False)
+
+sc_banner:
+  alias: str(required=False)
+  type: enum('informational', 'warning', 'critical', required=False)
+  message: str(required=False)
+  state: enum('active', 'inactive', required=False)
+
+remote_locations:
+  name: str()
+  description: str(required=False)
+  hostname_ip: str()
+  port: int(min=0, max=65535, required=False)
+  protocol: enum('scp', 'sftp', required=False)
+  path: str(required=False)
+  authentication: enum('password', 'sshKey', required=False)
+  username: str(required=False) # @sensitive()
+  password: any(str(), null(), required=False) # @sensitive()
+  ssh_key: any(str(), null(), required=False) # @sensitive()
+  passphrase: any(str(), null(), required=False) # @sensitive()
+
+sites:
+  name: str()
+  apic_urls: list(str()) # @ref_name(URL)
+  username: str(required=False) # @sensitive()
+  password: any(str(), null(), required=False) # @sensitive()
+  id: int(min=1, required=False)
+  fabric_id: int(min=1, required=False)
+  location: include('sites_location', required=False) # @flatten()
+  multisite: bool(required=False)
+  multicast_tep: ip(required=False)
+  bgp: include('sites_bgp', required=False) # @flatten()
+  ospf: include('sites_ospf', required=False) # @flatten()
+  routed_domain: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False)
+  ospf_policies: list(include('sites_ospf_policies'), required=False) # @ref_name(OSPF Policy)
+  pods: list(include('sites_pods'), required=False) # @ref_name(Pod) @key(id)
+
+sites_location:
+  long: str() # @name(Location Long)
+  lat: str() # @name(Location Lat)
+
+sites_bgp:
+  as: int(min=1, max=4294967295, required=False) # @name(BGP AS)
+  password: any(str(), null(), required=False) # @name(BGP Password) @sensitive()
+
+sites_ospf:
+  area_id: any(int(min=0, max=4294967295), enum('backbone'), ip(), required=False) # @name(OSPF Area ID)
+  area_type: enum('regular', 'stub', 'nssa', required=False) # @name(OSPF Area Type)
+
+sites_ospf_policies:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  network_type: enum('point-to-point', 'broadcast', required=False)
+  priority: int(min=0, max=255, required=False)
+  interface_cost: int(min=0, max=65535, required=False)
+  passive_interface: bool(required=False)
+  mtu_ignore: bool(required=False)
+  advertise_subnet: bool(required=False)
+  bfd: bool(required=False)
+  hello_interval: int(min=1, max=65535, required=False)
+  dead_interval: int(min=1, max=65535, required=False)
+  retransmit_interval: int(min=1, max=65535, required=False)
+  retransmit_delay: int(min=1, max=450, required=False)
+
+sites_pods:
+  id: int(min=1, max=255)
+  unicast_tep: ip(required=False)
+  spines: list(include('sites_pods_spines'), required=False) # @ref_name(Spine) @key(id)
+  external_tep_pools: list(include('sites_pods_external_tep_pools'), required=False)
+
+sites_pods_external_tep_pools:
+  ip: ip()
+
+sites_pods_spines:
+  id: int(min=1, max=4000)
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  bgp_peering: bool(required=False)
+  bgp_route_reflector: bool(required=False)
+  control_plane_tep: ip(required=False)
+  interfaces: list(include('sites_pods_spines_interfaces'), required=False)
+
+sites_pods_spines_interfaces:
+  port: int(min=1, max=127)
+  module: int(min=1, max=9, required=False)
+  ip: ip()
+  mtu: any(enum('inherit'), int(min=576, max=9216), required=False)
+  ospf: include('sites_pods_spines_interfaces_ospf', required=False) # @flatten()
+
+sites_pods_spines_interfaces_ospf:
+  policy: regex('^[a-zA-Z0-9_.:-]{1,64}$') # @name(OSPF Policy)
+  authentication_type: enum('none', 'simple', 'md5', required=False) # @name(OSPF Authentication Type)
+  authentication_key: any(str(), null(), required=False) # @name(OSPF Authentication Key) @sensitive()
+  authentication_key_id: int(min=1, max=255, required=False) # @name(OSPF Authentication Key ID)
+
+fabric_connectivity:
+  bgp: include('fc_bgp', required=False) # @flatten()
+
+fc_bgp:
+  peering_type: enum('full-mesh', 'route-reflector', required=False) # @name(BGP Peering Type)
+  ttl: int(min=1, max=255, required=False) # @name(BGP TTL)
+  max_as: int(min=0, max=2000, required=False) # @name(BGP Max AS)
+  keepalive_interval: int(min=0, max=3600, required=False) # @name(BGP Keepalive Interval)
+  hold_interval: int(min=0, max=3600, required=False) # @name(BGP Hold Interval)
+  stale_interval: int(min=1, max=3600, required=False) # @name(BGP Stale Interval)
+  graceful_restart: bool(required=False) # @name(BGP Graceful Restart)
+
+tenants:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  sites: list(include('tenants_sites'), required=False) # @name(Tenant Sites)
+  users: list(include('tenants_users'), required=False) # @name(Tenant Users)
+  orchestrator_only: bool(required=False)
+
+tenants_sites:
+  name: str() # @ref_table(ndo.sites)
+  azure_subscription_id: str(required=False)
+  azure_shared_tenant: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False) # @ref_table(ndo.tenants)
+
+tenants_users:
+  name: str()
+  domain: str(required=False)
+
+schemas:
+  name: regex('^[a-zA-Z0-9\s+_.:-]{1,64}$')
+  templates: list(include('schemas_templates'), required=False) # @ref_name(Template)
+
+schemas_templates:
+  name: str()
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  type: enum('multi_site', 'autonomous', required=False)
+  tenant: regex('^[a-zA-Z0-9_.:-]{1,64}$') # @ref_table(ndo.tenants)
+  application_profiles: list(include('t_application_profiles'), required=False) # @ref_name(Application Profile)
+  vrfs: list(include('t_vrfs'), required=False) # @ref_name(VRF)
+  bridge_domains: list(include('t_bridge_domains'), required=False) # @ref_name(Bridge Domain)
+  filters: list(include('t_filters'), required=False) # @ref_name(Filter)
+  contracts: list(include('t_contracts'), required=False) # @ref_name(Contract)
+  l3outs: list(include('t_l3outs'), required=False) # @ref_name(L3out)
+  external_endpoint_groups: list(include('t_external_endpoint_groups'), required=False) # @name(External EPGs) @ref_name(External EPG)
+  service_graphs: list(include('t_service_graphs'), required=False) # @ref_name(Service Graph)
+  sites: list(str(), required=False) # @name(Template Sites) @ref_name(Site)
+  deploy_order: int(min=1, max=3, required=False) # @description(Terraform only)
+
+t_application_profiles:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  endpoint_groups: list(include('t_ap_endpoint_groups'), required=False) # @name(EPGs) @ref_name(EPG)
+
+t_ap_endpoint_groups:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  useg: bool(required=False)
+  intra_epg_isolation: bool(required=False)
+  proxy_arp: bool(required=False)
+  preferred_group: bool(required=False)
+  bridge_domain: include('t_ap_epg_bridge_domain', required=False) # @flatten() @description(Required for On-Premises)
+  vrf: include('t_ap_epg_vrf', required=False) # @flatten() @description(Required for Cloud)
+  subnets: list(include('t_ap_epg_subnets'), required=False) # @name(EPG Subnets) @ref_name(Subnet)
+  contracts: include('t_ap_epg_contracts', required=False) # @flatten()
+  sites: list(include('t_ap_epg_sites'), required=False) # @name(EPG Sites) @ref_name(Site)
+
+t_ap_epg_bridge_domain:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$') # @name(Bridge Domain Name) @ref_table(schemas_templates.bridge_domains) @description(Required for On-Premises)
+  schema: str(required=False) # @name(Bridge Domain Schema) @ref_table(ndo.schemas)
+  template: str(required=False) # @name(Bridge Domain Template) @ref_table(schemas.templates)
+
+t_ap_epg_vrf:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$') # @name(VRF Name) @ref_table(schemas_templates.vrfs) @description(Required for Cloud)
+  schema: str(required=False) # @name(VRF Schema) @ref_table(ndo.schemas)
+  template: str(required=False) # @name(VRF Template) @ref_table(schemas.templates)
+
+t_ap_epg_subnets:
+  ip: ip()
+  scope: enum('private', 'public', required=False)
+  shared: bool(required=False)
+  no_default_gateway: bool(required=False)
+  primary: bool(required=False)
+
+t_ap_epg_contracts:
+  consumers: list(include('t_ap_epg_contracts_consumers'), required=False) # @name(EPG Consumers)
+  providers: list(include('t_ap_epg_contracts_providers'), required=False) # @name(EPG Providers)
+
+t_ap_epg_contracts_consumers:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$') # @ref_table(schemas_templates.contracts)
+  schema: str(required=False) # @ref_table(ndo.schemas)
+  template: str(required=False) # @ref_table(schemas.templates)
+
+t_ap_epg_contracts_providers:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$') # @ref_table(schemas_templates.contracts)
+  schema: str(required=False) # @ref_table(ndo.schemas)
+  template: str(required=False) # @ref_table(schemas.templates)
+
+t_ap_epg_sites:
+  name: str() # @ref_table(ndo.sites)
+  physical_domains: list(include('t_ap_epg_sites_physical_domains'), required=False) # @name(EPG Physical Domains)
+  vmware_vmm_domains: list(include('t_ap_epg_sites_vmware_vmm_domains'), required=False) # @name(EPG VMware VMM Domains)
+  static_ports: list(include('t_ap_epg_sites_static_ports'), required=False) # @name(EPG Static Ports)
+  static_leafs: list(include('t_ap_epg_sites_static_leafs'), required=False) # @name(EPG Static Leafs)
+  subnets: list(include('t_ap_epg_sites_subnets'), required=False) # @name(EPG Site Subnets)
+  selectors: list(include('t_ap_epg_sites_selectors'), required=False) # @name(EPG Selectors) @ref_name(Selector) @description(Cloud only)
+
+t_ap_epg_sites_physical_domains:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  deployment_immediacy: enum('immediate', 'lazy', required=False)
+  resolution_immediacy: enum('immediate', 'lazy', 'pre-provision', required=False)
+
+t_ap_epg_sites_vmware_vmm_domains:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  deployment_immediacy: enum('immediate', 'lazy', required=False)
+  resolution_immediacy: enum('immediate', 'lazy', 'pre-provision', required=False)
+  custom_epg_name: regex('^.{1,80}$', required=False)
+  vlan_mode: enum('static', 'dynamic', required=False)
+  vlan: int(min=1, max=4096, required=False)
+  u_segmentation: bool(required=False)
+  useg_vlan: int(min=1, max=4096, required=False)
+  enhanced_lag_policy_name: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False)
+
+t_ap_epg_sites_static_ports:
+  type: enum('port', 'vpc', 'pc', required=False)
+  pod: int(min=1, max=255, required=False)
+  node: int(min=1, max=4000, required=False)
+  fex: int(min=101, max=199, required=False)
+  fex_2: int(min=101, max=199, required=False)
+  node_1: int(min=1, max=4000, required=False)
+  node_2: int(min=1, max=4000, required=False)
+  port: int(min=1, max=127, required=False)
+  sub_port: int(min=1, max=16, required=False)
+  module: int(min=1, max=9, required=False)
+  channel: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False)
+  vlan: int(min=1, max=4096)
+  useg_vlan: int(min=1, max=4096, required=False)
+  deployment_immediacy: enum('immediate', 'lazy', required=False)
+  mode: enum('regular', 'native', 'untagged', required=False)
+
+t_ap_epg_sites_static_leafs:
+  pod: int(min=1, max=255, required=False)
+  node: int(min=1, max=4000)
+  vlan: int(min=1, max=4096)
+
+t_ap_epg_sites_subnets:
+  ip: ip()
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  scope: enum('private', 'public', required=False)
+  shared: bool(required=False)
+  no_default_gateway: bool(required=False)
+  primary: bool(required=False)
+
+t_ap_epg_sites_selectors:
+  name: str()
+  expressions: list(include('t_ap_epg_sites_selectors_expressions'), required=False) # @name(EPG Selector Expressions)
+
+t_ap_epg_sites_selectors_expressions:
+  key: enum('ipAddress', 'region')
+  operator: enum('equals', 'notEquals')
+  value: str()
+
+t_vrfs:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  data_plane_learning: bool(required=False)
+  preferred_group: bool(required=False)
+  l3_multicast: bool(required=False)
+  vzany: bool(required=False)
+  sites: list(include('t_vrf_sites'), required=False) # @name(VRF Sites) @ref_name(Site)
+  contracts: include('t_vrfs_contracts', required=False) # @flatten()
+  site_aware_policy_enforcement: bool(required=False)
+
+t_vrfs_contracts:
+  consumers: list(include('t_vrfs_contracts_consumers'), required=False) # @name(VRF Consumers)
+  providers: list(include('t_vrfs_contracts_providers'), required=False) # @name(VRF Providers)
+
+t_vrfs_contracts_consumers:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$') # @ref_table(schemas_templates.contracts)
+  schema: str(required=False) # @ref_table(ndo.schemas)
+  template: str(required=False) # @ref_table(schemas.templates)
+
+t_vrfs_contracts_providers:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$') # @ref_table(schemas_templates.contracts)
+  schema: str(required=False) # @ref_table(ndo.schemas)
+  template: str(required=False) # @ref_table(schemas.templates)
+
+t_vrf_sites:
+  name: str() # @ref_table(ndo.sites)
+  regions: list(include('t_vrf_sites_regions'), required=False) # @name(VRF Regions) @ref_name(Region)
+
+t_vrf_sites_regions:
+  name: str()
+  hub_network: bool(required=False)
+  hub_network_name: str(required=False)
+  hub_network_tenant: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False) # @ref_table(ndo.tenants)
+  vpn_gateway: bool(required=False)
+  cidrs: list(include('t_vrf_sites_regions_cidrs'), required=False) # @name(VRF Region CIDRs) @ref_name(CIDR)
+
+t_vrf_sites_regions_cidrs:
+  ip: ip()
+  subnets: list(include('t_vrf_sites_regions_cidrs_subnets'), required=False) # @name(VRF Region CIDR Subnet)
+
+t_vrf_sites_regions_cidrs_subnets:
+  ip: ip()
+  zone: str(required=False)
+  name: str(required=False)
+
+t_bridge_domains:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  l2_unknown_unicast: enum('proxy', 'flood', required=False)
+  intersite_bum_traffic: bool(required=False)
+  optimize_wan_bandwidth: bool(required=False)
+  l2_stretch: bool(required=False)
+  unicast_routing: bool(required=False)
+  arp_flooding: bool(required=False)
+  l3_multicast: bool(required=False)
+  virtual_mac: mac(required=False)
+  multi_destination_flooding: enum('bd-flood', 'encap-flood', 'drop', required=False)
+  unknown_ipv4_multicast: enum('flood', 'opt-flood', required=False)
+  unknown_ipv6_multicast: enum('flood', 'opt-flood', required=False)
+  ep_move_detection_mode: enum('garp', 'none', required=False)
+  vrf: include('t_bd_vrf') # @flatten()
+  subnets: list(include('t_bd_subnets'), required=False) # @name(Bridge Domain Subnets)
+  sites: list(include('t_bd_sites'), required=False) # @name(Bridge Domain Sites) @ref_name(Site)
+#  dhcp_policies: list(include('t_bd_dhcp_policies'), required=False)
+
+t_bd_vrf:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$') # @name(VRF Name) @ref_table(schemas_templates.vrfs)
+  schema: str(required=False) # @name(VRF Schema) @ref_table(ndo.schemas)
+  template: str(required=False) # @name(VRF Template) @ref_table(schemas.templates)
+
+t_bd_subnets:
+  ip: ip()
+  scope: enum('private', 'public', required=False)
+  shared: bool(required=False)
+  no_default_gateway: bool(required=False)
+  querier: bool(required=False)
+  primary: bool(required=False)
+
+# t_bd_dhcp_policies:
+#   dhcp_relay_policy: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+#   dhcp_option_policy: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False)
+
+t_bd_sites:
+  name: str() # @ref_table(ndo.sites)
+  advertise_host_routes: bool(required=False)
+  subnets: list(include('t_bd_subnets'), required=False) # @name(Bridge Domain Site Subnets)
+  l3outs: list(regex('^[a-zA-Z0-9_.:-]{1,64}$'), required=False) # @name(Bridge Domain Site L3outs) @ref_name(L3out) # @ref_table(schemas_templates.l3outs)
+  mac: mac(required=False)
+
+t_filters:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  entries: list(include('t_filters_entries'), required=False) # @name(Filter Entries)
+
+t_filters_entries:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  ethertype: enum('unspecified', 'ipv4', 'trill', 'arp', 'ipv6', 'mpls_ucast', 'mac_security', 'fcoe', 'ip', required=False)
+  protocol: any(int(min=0, max=255), enum('unspecified', 'icmp', 'igmp', 'tcp', 'egp', 'igp', 'udp', 'icmpv6', 'eigrp', 'ospfigp', 'pim', 'l2tp'), required=False)
+  source_from_port: any(int(min=0, max=65535), enum('unspecified', 'ftpData', 'smtp', 'dns', 'http', 'pop3', 'https', 'rtsp', 'ssh'), required=False)
+  source_to_port: any(int(min=0, max=65535), enum('unspecified', 'ftpData', 'smtp', 'dns', 'http', 'pop3', 'https', 'rtsp', 'ssh'), required=False)
+  destination_from_port: any(int(min=0, max=65535), enum('unspecified', 'ftpData', 'smtp', 'dns', 'http', 'pop3', 'https', 'rtsp', 'ssh'), required=False)
+  destination_to_port: any(int(min=0, max=65535), enum('unspecified', 'ftpData', 'smtp', 'dns', 'http', 'pop3', 'https', 'rtsp', 'ssh'), required=False)
+  stateful: bool(required=False)
+
+t_l3outs:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  vrf: include('t_l3outs_vrf') # @flatten()
+
+t_l3outs_vrf:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$') # @name(VRF Name) @ref_table(schemas_templates.vrfs)
+  schema: str(required=False) # @name(VRF Schema) @ref_table(ndo.schemas)
+  template: str(required=False) # @name(VRF Template) @ref_table(schemas.templates)
+
+t_external_endpoint_groups:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  type: enum('on-premise', 'cloud', required=False)
+  preferred_group: bool(required=False)
+  vrf: include('t_eepg_vrf') # @flatten()
+  l3out: include('t_eepg_l3out', required=False) # @flatten()
+  application_profile: include('t_eepg_ap', required=False) # @flatten()
+  subnets: list(include('t_eepg_subnet'), required=False) # @name(External EPG Subnets)
+  contracts: include('t_eepg_contracts', required=False) # @flatten()
+  selectors: list(include('t_eepg_selectors'), required=False) # @name(External EPG Selectors) @ref_name(Selector)
+  sites: list(include('t_eepg_sites'), required=False) # @name(External EPG Sites) @ref_name(Site)
+
+t_eepg_vrf:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$') # @name(VRF Name) # @ref_table(schemas_templates.vrfs)
+  schema: str(required=False) # @name(VRF Schema) @ref_table(ndo.schemas)
+  template: str(required=False) # @name(VRF Template) @ref_table(schemas.templates)
+
+t_eepg_l3out:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$') # @name(L3out Name) # @ref_table(schemas_templates.l3outs)
+  schema: str(required=False) # @name(L3out Schema) @ref_table(ndo.schemas)
+  template: str(required=False) # @name(L3out Template) @ref_table(schemas.templates)
+
+t_eepg_ap:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$') # @name(Application Profile Name) # @ref_table(schemas_templates.application_profiles)
+  schema: str(required=False) # @name(Application Profile Schema) @ref_table(ndo.schemas)
+  template: str(required=False) # @name(Application Profile Template) @ref_table(schemas.templates)
+
+t_eepg_subnet:
+  prefix: ip()
+  import_route_control: bool(required=False)
+  export_route_control: bool(required=False)
+  shared_route_control: bool(required=False)
+  import_security: bool(required=False)
+  shared_security: bool(required=False)
+  aggregate_import: bool(required=False)
+  aggregate_export: bool(required=False)
+  aggregate_shared: bool(required=False)
+
+t_eepg_contracts:
+  consumers: list(include('t_eepg_contracts_consumers'), required=False) # @name(External EPG Consumers)
+  providers: list(include('t_eepg_contracts_providers'), required=False) # @name(External EPG Providers)
+
+t_eepg_contracts_consumers:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$') # @ref_table(schemas_templates.contracts)
+  schema: str(required=False) # @ref_table(ndo.schemas)
+  template: str(required=False) # @ref_table(schemas.templates)
+
+t_eepg_contracts_providers:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$') # @ref_table(schemas_templates.contracts)
+  schema: str(required=False) # @ref_table(ndo.schemas)
+  template: str(required=False) # @ref_table(schemas.templates)
+
+t_eepg_selectors:
+  name: str()
+  ips: list(ip()) # @name(External EPG Selector IPs) @ref_name(IP)
+
+t_eepg_sites:
+  name: str() # @ref_table(ndo.sites)
+  tenant: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False) # @ref_table(ndo.tenants)
+  l3out: include('t_eepg_sites_l3out', required=False) # @flatten()
+  route_reachability: enum('internet', 'site-ext', required=False)
+  selectors: list(include('t_eepg_sites_selectors'), required=False) # @name(External EPG Site Selectors) @ref_name(Selector)
+
+t_eepg_sites_l3out:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$') # @name(L3out Name) # @ref_table(schemas_templates.l3outs)
+  tenant: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False) # @name(L3out Tenant) @ref_table(ndo.tenants)
+  schema: str(required=False) # @name(L3out Schema) @ref_table(ndo.schemas)
+  template: str(required=False) # @name(L3out Template) @ref_table(schemas.templates)
+
+t_eepg_sites_selectors:
+  name: str()
+  ips: list(ip()) # @name(External EPG Site Selector IPs) @ref_name(IP)
+
+t_contracts:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  scope: enum('application-profile', 'tenant', 'context', 'global', required=False)
+  type: enum('bothWay', 'oneWay', required=False)
+  filters: list(include('t_contracts_filters'), required=False) # @name(Contract BiDir Filters)
+  provider_to_consumer_filters: list(include('t_contracts_filters'), required=False) # @name(Contract Prov-Con Filters)
+  consumer_to_provider_filters: list(include('t_contracts_filters'), required=False) # @name(Contract Con-Prov Filters)
+  service_graph: include('t_contracts_service_graph', required=False) # @flatten()
+
+t_contracts_filters:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$') # @ref_table(schemas_templates.filters)
+  schema: str(required=False) # @ref_table(ndo.schemas)
+  template: str(required=False) # @ref_table(schemas.templates)
+  log: bool(required=False)
+  policy_compression: bool(required=False)
+
+t_contracts_service_graph:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$') # @name(Service Graph Name)
+  schema: str(required=False) # @name(Service Graph Schema) @ref_table(ndo.schemas)
+  template: str(required=False) # @name(Service Graph Template) @ref_table(schemas.templates)
+  nodes: list(include('t_contracts_service_graph_nodes')) # @name(Contract Service Graph Nodes) @ref_name(Node)
+
+t_contracts_service_graph_nodes:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  index: int(min=1, max=3, required=False) # @description(Terraform only)
+  provider: include('t_contracts_service_graph_nodes_prov') # @flatten()
+  consumer: include('t_contracts_service_graph_nodes_con') # @flatten()
+
+t_contracts_service_graph_nodes_prov:
+  bridge_domain: regex('^[a-zA-Z0-9_.:-]{1,64}$') # @name(Provider Bridge Domain Name) @ref_table(schemas_templates.bridge_domains)
+  schema: str(required=False) # @name(Provider Bridge Domain Schema) @ref_table(ndo.schemas)
+  template: str(required=False) # @name(Provider Bridge Domain Template) @ref_table(schemas.templates)
+  sites: list(include('t_contracts_service_graph_nodes_prov_sites')) # @name(Contract SG Node Provider Sites)
+
+t_contracts_service_graph_nodes_prov_sites:
+  name: str() # @ref_table(ndo.sites)
+  tenant: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False) # @ref_table(ndo.tenants)
+  device: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  logical_interface: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  redirect_policy: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False)
+
+t_contracts_service_graph_nodes_con:
+  bridge_domain: regex('^[a-zA-Z0-9_.:-]{1,64}$') # @name(Consumer Bridge Domain Name)
+  schema: str(required=False) # @name(Consumer Bridge Domain Schema) @ref_table(ndo.schemas)
+  template: str(required=False) # @name(Consumer Bridge Domain Template) @ref_table(schemas.templates)
+  sites: list(include('t_contracts_service_graph_nodes_con_sites')) # @name(Contract SG Node Consumer Sites)
+
+t_contracts_service_graph_nodes_con_sites:
+  name: str() # @ref_table(ndo.sites)
+  tenant: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False) # @ref_table(ndo.tenants)
+  device: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  logical_interface: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  redirect_policy: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False)
+
+t_service_graphs:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  nodes: list(include('t_service_graphs_nodes')) # @name(Service Graph Nodes) @ref_name(Node)
+
+t_service_graphs_nodes:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  type: enum('firewall', 'load-balancer', 'other', required=False)
+  index: int(min=1, max=3, required=False)
+  sites: list(include('t_service_graphs_nodes_sites')) # @name(Service Graph Node Sites)
+
+t_service_graphs_nodes_sites:
+  name: str() # @ref_table(ndo.sites)
+  tenant: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False) # @ref_table(ndo.tenants)
+  device: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+
+tenant_templates:
+  tenant_policies: list(include('tenant_policies'), required=False) # @name(Tenant Policies) @ref_name(Tenant Policy)
+
+tenant_policies:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  tenant: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  dhcp_relay_policies: list(include('tp_dhcp_relay_policies'), required=False) # @name(Ten Pol DHCP Relay Policies) @ref_name(DHCP Relay Policy)
+  ip_sla_policies: list(include('tp_ip_sla_policies'), required=False) # @name(IP SLA Policies) @ref_name(IP SLA Policy)
+  ip_sla_track_lists: list(include('tp_ip_sla_track_lists'), required=False) # @name(IP SLA Track Lists) @ref_name(IP SLA Track List)
+  multicast_route_maps: list(include('tp_multicast_route_maps'), required=False) # @name(Multicast Route Maps) @ref_name(Multicast Route Map)
+  bgp_peer_prefix_policies: list(include('tp_bgp_peer_prefix_policies'), required=False) # @name(BGP Peer Prefix Policies) @ref_name(BGP Peer Prefix Policy)
+  dhcp_option_policies: list(include('tp_dhcp_option_policies'), required=False) # @name(DHCP Option Policies) @ref_name(DHCP Option Policy)
+  custom_qos_policies: list(include('tp_custom_qos_policies'), required=False) # @name(Custom QoS Policies) @ref_name(Custom QoS Policy)
+  l3out_interface_routing_policies: list(include('tp_l3out_interface_routing_policies'), required=False) # @name(L3Out Interface Routing Policies) @ref_name(L3Out Interface Routing Policy)
+  mld_snooping_policies: list(include('tp_mld_snooping_policies'), required=False) # @name(MLD Snooping Policies) @ref_name(MLD Snooping Policy)
+  sites: list(str(), required=False) # @name(Tenant Policy Sites) @ref_name(Site)
+  deploy_order: int(min=1, max=3, required=False) # @description(Terraform only)
+
+tp_dhcp_relay_policies:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  description: regex('^[a-zA-Z0-9\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  providers: list(include('tp_dhcp_relay_policies_providers'), required=False) # @name(Ten Pol DHCP Relay Providers) @ref_name(Provider)
+
+tp_dhcp_relay_policies_providers:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  ip: ip()
+  type: enum('epg', 'external_epg')
+  schema: regex('^[a-zA-Z0-9\s+_.:-]{1,64}$')
+  template: str()
+  application_profile: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False)
+  endpoint_group: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False)
+  l3out: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False)
+  external_endpoint_group: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False)
+  use_server_vrf: bool(required=False)
+
+tp_ip_sla_policies:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  frequency: int(min=1, max=300, required=False)
+  multiplier: int(min=1, max=100, required=False)
+  sla_type: enum('icmp', 'tcp', 'l2ping', 'http', required=False)
+  port: int(min=1, max=65535, required=False)
+  http_version: enum('HTTP10', 'HTTP11', required=False)
+  http_uri: regex('^/.{0,512}$', required=False)
+  request_data_size: int(min=0, max=17512, required=False)
+  type_of_service: int(min=0, max=255, required=False)
+  timeout: int(min=1, max=604800000, required=False)
+  threshold: int(min=1, max=604800000, required=False)
+  ipv6_traffic_class: int(min=0, max=255, required=False)
+
+tp_ip_sla_track_lists:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  type: enum('percentage', 'weight', required=False)
+  percentage_up: int(min=0, max=100, required=False)
+  percentage_down: int(min=0, max=100, required=False)
+  weight_up: int(min=0, max=65535, required=False)
+  weight_down: int(min=0, max=65535, required=False)
+  members: list(include('tp_ip_sla_track_list_members'), required=False) # @name(IP SLA Track List Members) @sheet_hidden()
+
+tp_ip_sla_track_list_members:
+  destination_ip: ip()
+  ip_sla_policy: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  scope_type: enum('bd', 'l3out')
+  schema: regex('^[a-zA-Z0-9\s+_.:-]{1,64}$')
+  template: str()
+  bridge_domain: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False)
+  l3out: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False)
+
+tp_multicast_route_maps:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  entries: list(include('tp_multicast_route_map_entries'), required=False) # @name(Multicast Route Map Entries) @sheet_hidden()
+
+tp_multicast_route_map_entries:
+  order: int(min=0, max=65535)
+  source_ip: ip(required=False)
+  group_ip: ip(required=False)
+  rp_ip: ip(required=False)
+  action: enum('permit', 'deny', required=False)
+
+tp_bgp_peer_prefix_policies:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  action: enum('log', 'reject', 'restart', 'shutdown', required=False)
+  max_prefixes: int(min=1, max=300000, required=False)
+  threshold: int(min=1, max=100, required=False)
+  restart_time: int(min=1, max=65535, required=False)
+
+tp_dhcp_option_policies:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  options: list(include('tp_dhcp_option_policies_options'), required=False) # @name(DHCP Option Policy Options) @sheet_hidden()
+
+tp_dhcp_option_policies_options:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  id: int(min=0, max=255, required=False)
+  data: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,64}$', required=False)
+
+tp_custom_qos_policies:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  dscp_mappings: list(include('tp_custom_qos_dscp_mappings'), required=False) # @name(Custom QoS DSCP Mappings) @sheet_hidden()
+  cos_mappings: list(include('tp_custom_qos_cos_mappings'), required=False) # @name(Custom QoS CoS Mappings) @sheet_hidden()
+
+tp_custom_qos_dscp_mappings:
+  dscp_from: enum('unspecified', 'af11', 'af12', 'af13', 'af21', 'af22', 'af23', 'af31', 'af32', 'af33', 'af41', 'af42', 'af43', 'cs0', 'cs1', 'cs2', 'cs3', 'cs4', 'cs5', 'cs6', 'cs7', 'expedited_forwarding', 'voice_admit', required=False)
+  dscp_to: enum('unspecified', 'af11', 'af12', 'af13', 'af21', 'af22', 'af23', 'af31', 'af32', 'af33', 'af41', 'af42', 'af43', 'cs0', 'cs1', 'cs2', 'cs3', 'cs4', 'cs5', 'cs6', 'cs7', 'expedited_forwarding', 'voice_admit', required=False)
+  dscp_target: enum('unspecified', 'af11', 'af12', 'af13', 'af21', 'af22', 'af23', 'af31', 'af32', 'af33', 'af41', 'af42', 'af43', 'cs0', 'cs1', 'cs2', 'cs3', 'cs4', 'cs5', 'cs6', 'cs7', 'expedited_forwarding', 'voice_admit', required=False)
+  cos_target: any(int(min=0, max=7), enum('unspecified', 'background', 'best_effort', 'excellent_effort', 'critical_applications', 'video', 'voice', 'internetwork_control', 'network_control'), required=False)
+  priority: enum('unspecified', 'level1', 'level2', 'level3', 'level4', 'level5', 'level6', required=False)
+
+tp_custom_qos_cos_mappings:
+  dot1p_from: any(int(min=0, max=7), enum('unspecified', 'background', 'best_effort', 'excellent_effort', 'critical_applications', 'video', 'voice', 'internetwork_control', 'network_control'), required=False)
+  dot1p_to: any(int(min=0, max=7), enum('unspecified', 'background', 'best_effort', 'excellent_effort', 'critical_applications', 'video', 'voice', 'internetwork_control', 'network_control'), required=False)
+  dscp_target: enum('unspecified', 'af11', 'af12', 'af13', 'af21', 'af22', 'af23', 'af31', 'af32', 'af33', 'af41', 'af42', 'af43', 'cs0', 'cs1', 'cs2', 'cs3', 'cs4', 'cs5', 'cs6', 'cs7', 'expedited_forwarding', 'voice_admit', required=False)
+  cos_target: any(int(min=0, max=7), enum('unspecified', 'background', 'best_effort', 'excellent_effort', 'critical_applications', 'video', 'voice', 'internetwork_control', 'network_control'), required=False)
+  priority: enum('unspecified', 'level1', 'level2', 'level3', 'level4', 'level5', 'level6', required=False)
+
+tp_l3out_interface_routing_policies:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  bfd_multi_hop_settings: include('tp_l3out_intf_bfd_multihop', required=False) # @name(BFD Multi-Hop Settings) @sheet_hidden()
+  bfd_settings: include('tp_l3out_intf_bfd', required=False) # @name(BFD Settings) @sheet_hidden()
+  ospf_interface_settings: include('tp_l3out_intf_ospf', required=False) # @name(OSPF Interface Settings) @sheet_hidden()
+
+tp_l3out_intf_bfd_multihop:
+  admin_state: bool(required=False)
+  detection_multiplier: int(min=1, max=50, required=False)
+  min_rx_interval: int(min=250, max=999, required=False)
+  min_tx_interval: int(min=250, max=999, required=False)
+
+tp_l3out_intf_bfd:
+  admin_state: bool(required=False)
+  detection_multiplier: int(min=1, max=50, required=False)
+  min_rx_interval: int(min=50, max=999, required=False)
+  min_tx_interval: int(min=50, max=999, required=False)
+  echo_rx_interval: int(min=50, max=999, required=False)
+  echo_admin_state: bool(required=False)
+  interface_control: bool(required=False)
+
+tp_l3out_intf_ospf:
+  network_type: enum('broadcast', 'point-to-point', required=False)
+  priority: int(min=0, max=255, required=False)
+  interface_cost: int(min=0, max=65535, required=False)
+  hello_interval: int(min=1, max=65535, required=False)
+  dead_interval: int(min=1, max=65535, required=False)
+  retransmit_interval: int(min=1, max=65535, required=False)
+  transmit_delay: int(min=1, max=450, required=False)
+  advertise_subnet: bool(required=False)
+  bfd: bool(required=False)
+  mtu_ignore: bool(required=False)
+  passive_participation: bool(required=False)
+
+tp_mld_snooping_policies:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  admin_state: bool(required=False)
+  fast_leave_control: bool(required=False)
+  querier_control: bool(required=False)
+  querier_version: enum('v1', 'v2', required=False)
+  query_interval: int(min=1, max=18000, required=False)
+  query_response_interval: int(min=1, max=25, required=False)
+  last_member_query_interval: int(min=1, max=25, required=False)
+  start_query_interval: int(min=1, max=18000, required=False)
+  start_query_count: int(min=1, max=10, required=False)
+
+fabric_templates:
+  fabric_policies: list(include('fabric_policies'), required=False) # @name(Fabric Policies) @ref_name(Fabric Policy)
+
+fabric_policies:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  vlan_pools: list(include('fp_vlan_pools'), required=False) # @name(VLAN Pools) @ref_name(VLAN Pool)
+  physical_domains: list(include('fp_physical_domains'), required=False) # @name(Physical Domains) @ref_name(Physical Domain)
+  l3_domains: list(include('fp_l3_domains'), required=False) # @name(L3 Domains) @ref_name(L3 Domain)
+  mcp_global_policy: include('fp_mcp_global_policy', required=False) # @name(MCP Global Policy) @sheet_hidden()
+#  macsec_policies: list(include('fp_macsec_policies'), required=False) # @name(MACsec Policies) @ref_name(MACsec Policy)
+  synce_interface_policies: list(include('fp_synce_interface_policies'), required=False) # @name(Synce Interface Policies) @ref_name(Synce Interface Policy)
+  interfaces_settings: list(include('fp_interfaces_settings'), required=False) # @name(Interfaces Settings) @ref_name(Interface Setting)
+  sites: list(str(), required=False) # @name(Fabric Policy Sites) @ref_name(Site)
+  deploy_order: int(min=1, max=3, required=False) # @description(Terraform only)
+
+fp_vlan_pools:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  ranges: list(include('fp_vlan_pools_vlan_ranges'), required=False) # @name(VLAN Ranges) @ref_name(VLAN Range)
+
+fp_vlan_pools_vlan_ranges:
+  from: int(min=1, max=4094, required=False)
+  to: int(min=1, max=4094, required=False)
+
+fp_physical_domains:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  vlan_pool: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+
+fp_l3_domains:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  vlan_pool: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+
+fp_mcp_global_policy:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  admin_state: bool(required=False)
+  enable_mcp_pdu_per_vlan: bool(required=False)
+  key: str() # @sensitive()
+  loop_detection: int(min=1, max=255, required=False)
+  transmission_frequency_sec: int(min=0, max=300, required=False)
+  transmission_frequency_msec: int(min=0, max=999, required=False)
+  initial_delay: int(min=0, max=1800, required=False)
+  port_disable_protection: bool(required=False)
+
+ # fp_macsec_policies:
+ # name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+ # description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+ # admin_state: bool(required=False)
+ # type: enum('fabric', 'access', required=False)
+ # cipher_suite: enum('gcm-aes-128', 'gcm-aes-256', 'gcm-aes-xpn-128', 'gcm-aes-xpn-256', required=False)
+ # window_size: int(min=0, max=4294967295, required=False)
+ # security_policy: enum('should-secure', 'must-secure', required=False)
+ # sak_expiry_time: int(min=0, max=2592000, required=False)
+ # confidentiality_offset: enum('offset0', 'offset30', 'offset50', required=False)
+ # key_server_priority: int(min=0, max=255, required=False)
+ # keys: list(include('fp_macsec_policies_keys'), required=False) # @name(MACsec Policy Keys) @sheet_hidden()
+
+ # fp_macsec_policies_keys:
+ # key_name: regex('^[a-fA-F0-9]{0,64}$')
+ # pre_shared_key: regex('^[a-fA-F0-9]{0,64}$') # @sensitive()
+ # start_time: any(enum('now'), regex('^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$'), required=False)
+ # end_time: any(enum('infinite'), regex('^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$'), required=False)
+
+fp_synce_interface_policies:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  admin_state: bool(required=False)
+  sync_state_message: bool(required=False)
+  selection_input: bool(required=False)
+  source_priority: int(min=0, max=254, required=False)
+  wait_to_restore: int(min=0, max=12, required=False)
+
+fp_interfaces_settings:
+  name: regex('^[a-zA-Z0-9_.:-]{1,64}$')
+  description: regex('^[a-zA-Z0-9\\\\!#$%()*,-./:;@ _{|}~?&+]{1,128}$', required=False)
+  type: enum('physical', 'port-channel', required=False)
+  link_level: include('fp_is_link_level', required=False) # @flatten()
+  l2_interface: include('fp_is_l2_interface', required=False) # @flatten()
+  cdp: include('fp_is_cdp', required=False) # @flatten()
+  lldp: include('fp_is_lldp', required=False) # @flatten()
+  stp: include('fp_is_stp', required=False) # @flatten()
+  llfc: include('fp_is_llfc', required=False) # @flatten()
+  mcp: include('fp_is_mcp', required=False) # @flatten()
+  pfc: include('fp_is_pfc', required=False) # @flatten()
+  port_channel: include('fp_is_port_channel', required=False) # @flatten()
+  domains: list(regex('^[a-zA-Z0-9_.:-]{1,64}$'), required=False) # @name(Interfaces Settings Domains) @sheet_hidden()
+  synce_policy: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False)
+ # macsec_interface_policy: regex('^[a-zA-Z0-9_.:-]{1,64}$', required=False)
+
+fp_is_link_level:
+  speed: enum('100M', '1G', '10G', '25G', '40G', '50G', '100G', '200G', '400G', 'inherit', required=False)
+  auto: bool(required=False)
+  auto_enforce: bool(required=False)
+  fec_mode: enum('inherit','disabled', 'cl91-rs-fec', 'cl74-fc-fec', 'auto-fec', 'ieee-rs-fec', 'cons16-rs-fec', 'kp-fec', required=False)
+  debounce_interval: int(min=0, max=5000, required=False)
+  bring_up_delay: int(min=0, max=10000, required=False)
+
+fp_is_l2_interface:
+  vlan_scope: enum('global', 'portlocal', required=False)
+  qinq: enum('disabled', 'edgePort', 'corePort', 'doubleQtagPort', required=False)
+  reflective_relay: bool(required=False)
+
+fp_is_cdp:
+  admin_state: bool(required=False)
+
+fp_is_lldp:
+  admin_state: bool(required=False)
+  transmit_state: bool(required=False)
+  receive_state: bool(required=False)
+
+fp_is_stp:
+  bpdu_filter: bool(required=False)
+  bpdu_guard: bool(required=False)
+
+fp_is_llfc:
+  transmit_state: bool(required=False)
+  receive_state: bool(required=False)
+
+fp_is_mcp:
+  admin_state: bool(required=False)
+  strict_mode: bool(required=False)
+  initial_delay_time: int(min=0, max=1800, required=False)
+  transmission_frequency_sec: int(min=0, max=300, required=False)
+  transmission_frequency_msec: int(min=0, max=999, required=False)
+  grace_period_sec: int(min=0, max=300, required=False)
+  grace_period_msec: int(min=0, max=999, required=False)
+
+fp_is_pfc:
+  admin_state: bool(required=False)
+  auto: bool(required=False)
+
+fp_is_port_channel:
+  mode: enum('lacp-active', 'lacp-passive', 'static-channel-mode-on', 'mac-pinning', 'mac-pinning-physical-nic-load', 'use-explicit-failover-order', required=False)
+  suspend_individual: bool(required=False)
+  graceful_convergence: bool(required=False)
+  fast_select_standby: bool(required=False)
+  load_defer: bool(required=False)
+  symmetric_hash: bool(required=False)
+  min_links: int(min=1, max=16, required=False)
+  max_links: int(min=1, max=64, required=False)
+  load_balance_hashing: enum('destination-ip', 'layer-4-destination-ip', 'layer-4-source-ip', 'source-ip', required=False)

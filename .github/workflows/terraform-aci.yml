@@ -50,6 +50,11 @@ env:
   ND_JOB_TIMEOUT_MINUTES: '30'
   ND_POLL_INTERVAL: '15'
   ND_PRECHANGE_UI_PATH: '/analysis-hub/pre-change-analysis/view'
+  # ---- nac-test ----
+  NAC_TEST_DIR: tests-and-validations/02-post-deploy-tests
+  NAC_TEST_TEMPLATES: tests-and-validations/02-post-deploy-tests/tests/templates
+  NAC_TEST_FILTERS: tests-and-validations/02-post-deploy-tests/tests/filters
+  NAC_TEST_DEFAULTS: tests-and-validations/02-post-deploy-tests/tests/defaults
 
 permissions:
   contents: read
@@ -305,9 +310,9 @@ jobs:
               echo ''
               JOB="${{ steps.prechange.outputs.job_id }}"
               if [ -n "$JOB" ]; then
-                echo "🔗 [Open this pre-change analysis in Nexus Dashboard](https://${{ vars.ND_HOST }}${{ env.ND_PRECHANGE_UI_PATH }}/${{ vars.ND_FABRIC }}/${JOB})"
+                echo "🔗 [Open this pre-change analysis in Nexus Dashboard](${{ vars.ND_HOST }}${{ env.ND_PRECHANGE_UI_PATH }}/${{ vars.ND_FABRIC }}/${JOB})"
               else
-                echo "🔗 [Open Nexus Dashboard analysis hub](https://${{ vars.ND_HOST }}/analysis-hub/pre-change-analysis)"
+                echo "🔗 [Open Nexus Dashboard analysis hub](${{ vars.ND_HOST }}/analysis-hub/pre-change-analysis)"
               fi
               echo ''
               echo ''
@@ -415,9 +420,9 @@ jobs:
             // Deep link to this specific analysis; fall back to the hub if the
             // job never reached ND (prechange failed before submission).
             const ndLink = (host && fabric && jobId)
-              ? `🔗 [View this analysis in Nexus Dashboard](https://${host}/analysis-hub/pre-change-analysis/view/${fabric}/${jobId})`
+              ? `🔗 [View this analysis in Nexus Dashboard](${host}/analysis-hub/pre-change-analysis/view/${fabric}/${jobId})`
               : (host
-                  ? `🔗 [Nexus Dashboard analysis hub](https://${host}/analysis-hub/pre-change-analysis)`
+                  ? `🔗 [Nexus Dashboard analysis hub](${host}/analysis-hub/pre-change-analysis)`
                   : '');
 
             const body = [
@@ -536,82 +541,225 @@ jobs:
           ACI_PASSWORD: ${{ secrets.APIC_PASSWORD }}
           ACI_INSECURE: 'true'
 
-      - name: ND post-change delta
-        id: delta
+      # - name: ND post-change delta
+      #   id: delta
+      #   continue-on-error: true
+      #   run: |
+      #     # A fresh snapshot is required.
+      #     echo "Triggering post-change assurance analysis (several minutes)"
+      #     POST=""
+      #     for attempt in 1 2; do
+      #       set +e
+      #       nac-analytics nd analyze --output text > post.out 2> post.err
+      #       rc=$?
+      #       set -e
+      #       echo "--- analyze attempt ${attempt} (rc=${rc}) stderr ---"
+      #       cat post.err || true
+      #       echo "----------------------------------------------------"
+      #       POST="$(tail -n1 post.out | tr -d '[:space:]')"
+      #       [ -n "$POST" ] && break
+      #       if [ "$attempt" = "1" ]; then
+      #         echo "::warning::analyze returned no snapshot ID; retrying in 60s"
+      #         sleep 60
+      #       fi
+      #     done
+
+      #     PRE="${{ needs.plan.outputs.nd_snapshot }}"
+      #     echo "pre  snapshot: ${PRE:-<none>}"
+      #     echo "post snapshot: ${POST:-<none>}"
+
+      #     # Degrade rather than skip. 'nd delta' with no args compares
+      #     # latest-1 vs latest, which is correct right after apply + analyze.
+      #     if [ -n "$PRE" ] && [ -n "$POST" ]; then
+      #       ARGS=("$PRE" "$POST")
+      #       echo "comparing pinned pre vs pinned post"
+      #     elif [ -n "$POST" ]; then
+      #       ARGS=("latest-1" "$POST")
+      #       echo "::warning::No pinned baseline - comparing latest-1 vs the new post snapshot"
+      #     else
+      #       ARGS=()
+      #       echo "::warning::No snapshot IDs available - falling back to latest-1 vs latest"
+      #     fi
+
+      #     # Same as prechange: markdown goes to STDOUT, --report-file is JUnit only
+      #     set +e
+      #     nac-analytics nd delta "${ARGS[@]}" \
+      #       --fail-on "${ND_DELTA_FAIL_ON}" \
+      #       --detail full \
+      #       --output markdown \
+      #       > delta.raw 2> delta.err
+      #     code=$?
+      #     set -e
+
+      #     echo "--- CLI diagnostics (stderr) ---"
+      #     cat delta.err || true
+      #     echo "--------------------------------"
+      #     cat delta.raw || true
+
+      #     echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+
+      #     sed -n '/^# /,$p' delta.raw > nd-delta.md || true
+      #     [ -s nd-delta.md ] || \
+      #       echo "_No delta report produced (exit ${code})._" > nd-delta.md
+
+      #     case "$code" in
+      #       0) echo "ND delta: no new ${ND_DELTA_FAIL_ON} anomalies" ;;
+      #       2) echo "::warning::ND delta job failed, stopped, or timed out" ;;
+      #       3) echo "::warning::ND delta found new ${ND_DELTA_FAIL_ON} anomalies" ;;
+      #       4) echo "::error::ND rejected the delta request (bad input)" ;;
+      #       5) echo "::error::ND authentication or authorisation failure" ;;
+      #       *) echo "::warning::ND delta unexpected exit ${code}" ;;
+      #     esac
+      #     # Never fail the job - the change is already applied
+      #     exit 0
+
+
+      # ═══════════════ Post-change operational verification ═══════════════
+      - name: nac-test - change verification
+        id: nactest
         continue-on-error: true
+        working-directory: .
+        env:
+          ACI_URL:      ${{ secrets.APIC_URL }}
+          ACI_USERNAME: ${{ secrets.APIC_USERNAME }}
+          ACI_PASSWORD: ${{ secrets.APIC_PASSWORD }}
+          PYTHONWARNINGS: 'ignore:Unverified HTTPS request'
         run: |
-          # A fresh snapshot is required. 'snapshots latest' would race ND's own
-          # 2-4h collection cycle and could return the PRE-change state.
-          echo "Triggering post-change assurance analysis (several minutes)"
-          POST=""
-          for attempt in 1 2; do
-            set +e
-            nac-analytics nd analyze --output text > post.out 2> post.err
-            rc=$?
-            set -e
-            echo "--- analyze attempt ${attempt} (rc=${rc}) stderr ---"
-            cat post.err || true
-            echo "----------------------------------------------------"
-            POST="$(tail -n1 post.out | tr -d '[:space:]')"
-            [ -n "$POST" ] && break
-            if [ "$attempt" = "1" ]; then
-              echo "::warning::analyze returned no snapshot ID; retrying in 60s"
-              sleep 60
-            fi
-          done
-
-          PRE="${{ needs.plan.outputs.nd_snapshot }}"
-          echo "pre  snapshot: ${PRE:-<none>}"
-          echo "post snapshot: ${POST:-<none>}"
-
-          # Degrade rather than skip. 'nd delta' with no args compares
-          # latest-1 vs latest, which is correct right after apply + analyze.
-          if [ -n "$PRE" ] && [ -n "$POST" ]; then
-            ARGS=("$PRE" "$POST")
-            echo "comparing pinned pre vs pinned post"
-          elif [ -n "$POST" ]; then
-            ARGS=("latest-1" "$POST")
-            echo "::warning::No pinned baseline - comparing latest-1 vs the new post snapshot"
-          else
-            ARGS=()
-            echo "::warning::No snapshot IDs available - falling back to latest-1 vs latest"
-          fi
-
-          # Same as prechange: markdown goes to STDOUT, --report-file is JUnit only
           set +e
-          nac-analytics nd delta "${ARGS[@]}" \
-            --fail-on "${ND_DELTA_FAIL_ON}" \
-            --detail full \
-            --output markdown \
-            > delta.raw 2> delta.err
+          nac-test \
+            -d "${WORKING_DIR}/data" \
+            -d "${NAC_TEST_DEFAULTS}" \
+            -t "${NAC_TEST_TEMPLATES}" \
+            -f "${NAC_TEST_FILTERS}" \
+            -o nac-test-results \
+            --exclude baseline \
+            --exclude fabric-ping \
+            --minimal-reports
           code=$?
           set -e
-
-          echo "--- CLI diagnostics (stderr) ---"
-          cat delta.err || true
-          echo "--------------------------------"
-          cat delta.raw || true
-
           echo "exitcode=$code" >> "$GITHUB_OUTPUT"
 
-          sed -n '/^# /,$p' delta.raw > nd-delta.md || true
-          [ -s nd-delta.md ] || \
-            echo "_No delta report produced (exit ${code})._" > nd-delta.md
+          # Parse real per-test results from output.xml
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import xml.etree.ElementTree as ET, os, sys
+          try:
+              t = ET.parse('nac-test-results/robot_results/output.xml')
+          except Exception:
+              print("total=0"); print("passed=0"); print("failed=0")
+              sys.exit(0)
+          tests = list(t.iter('test'))
+          passed = sum(1 for x in tests
+                       if x.find('status').get('status') == 'PASS')
+          failed = sum(1 for x in tests
+                       if x.find('status').get('status') == 'FAIL')
+          print(f"total={len(tests)}")
+          print(f"passed={passed}")
+          print(f"failed={failed}")
+          PY
 
-          case "$code" in
-            0) echo "ND delta: no new ${ND_DELTA_FAIL_ON} anomalies" ;;
-            2) echo "::warning::ND delta job failed, stopped, or timed out" ;;
-            3) echo "::warning::ND delta found new ${ND_DELTA_FAIL_ON} anomalies" ;;
-            4) echo "::error::ND rejected the delta request (bad input)" ;;
-            5) echo "::error::ND authentication or authorisation failure" ;;
-            *) echo "::warning::ND delta unexpected exit ${code}" ;;
-          esac
-          # Never fail the job - the change is already applied
+          echo "nac-test exit ${code}"
           exit 0
 
+      - name: nac-test - fabric baseline (informational)
+        id: nactest_baseline
+        continue-on-error: true
+        working-directory: .
+        env:
+          ACI_URL:      ${{ secrets.APIC_URL }}
+          ACI_USERNAME: ${{ secrets.APIC_USERNAME }}
+          ACI_PASSWORD: ${{ secrets.APIC_PASSWORD }}
+          PYTHONWARNINGS: 'ignore:Unverified HTTPS request'
+        run: |
+          set +e
+          nac-test \
+            -d "${WORKING_DIR}/data" \
+            -d "${NAC_TEST_DEFAULTS}" \
+            -t "${NAC_TEST_TEMPLATES}" \
+            -f "${NAC_TEST_FILTERS}" \
+            -o nac-test-baseline \
+            --include baseline \
+            --minimal-reports
+          code=$?
+          set -e
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          echo "baseline exit ${code} (informational only)"
+          exit 0
+
+      - name: Extract failed test detail
+        if: always()
+        working-directory: .
+        run: |
+          python3 - > nac-test-failures.md <<'PY'
+          import xml.etree.ElementTree as ET, os
+          rows = []
+          for label, path in (
+              ("change", "nac-test-results/robot_results/output.xml"),
+              ("baseline", "nac-test-baseline/robot_results/output.xml"),
+          ):
+              if not os.path.exists(path):
+                  continue
+              t = ET.parse(path)
+              for tc in t.iter('test'):
+                  st = tc.find('status')
+                  if st.get('status') != 'FAIL':
+                      continue
+                  msg = ' '.join((st.text or '').split())[:160]
+                  rows.append((label, tc.get('name'), msg))
+          if rows:
+              print('| scope | test | reason |')
+              print('| --- | --- | --- |')
+              for label, name, msg in rows:
+                  name = name.replace('|', '\|')
+                  msg = msg.replace('|', '\|')
+                  print(f'| {label} | {name} | {msg} |')
+          else:
+              print('_All tests passed._')
+          PY
+          cat nac-test-failures.md
+      
+      # Build summary to be used with Nexus Dashboard Delta Analysis
+      # - name: Build step summary
+      #   if: always()
+      #   run: |
+      #     {
+      #       echo '# Applied to APIC'
+      #       echo ''
+      #       echo "Plan applied: **${{ needs.plan.outputs.summary }}**"
+      #       echo ''
+      #       echo "Pre-change prediction: ${{ needs.plan.outputs.nd_critical }} critical, ${{ needs.plan.outputs.nd_major }} major"
+      #       echo ''
+      #       JOB="${{ needs.plan.outputs.nd_job_id }}"
+      #       if [ -n "$JOB" ]; then
+      #         echo "🔗 [Pre-change analysis in Nexus Dashboard](${{ vars.ND_HOST }}${{ env.ND_PRECHANGE_UI_PATH }}/${{ vars.ND_FABRIC }}/${JOB})"
+      #       else
+      #         echo "🔗 [Nexus Dashboard analysis hub](${{ vars.ND_HOST }}/analysis-hub/pre-change-analysis)"
+      #       fi
+      #       echo ''
+      #       echo '## Nexus Dashboard post-change delta'
+      #       echo ''
+      #       case "${{ steps.delta.outputs.exitcode }}" in
+      #         0) echo '✅ **No new critical or major anomalies** introduced by this change.' ;;
+      #         3) echo '⚠️ **New anomalies detected** after applying this change - see detail below.' ;;
+      #         2) echo 'ℹ️ Delta analysis did not complete (job failed or timed out).' ;;
+      #         *) echo "ℹ️ Delta did not complete (exit ${{ steps.delta.outputs.exitcode }})." ;;
+      #       esac
+      #       echo ''
+      #       echo '<details><summary>Full delta report</summary>'
+      #       echo ''
+      #       cat nd-delta.md 2>/dev/null || echo '_none_'
+      #       echo ''
+      #       echo '</details>'
+      #     } >> "$GITHUB_STEP_SUMMARY"
+
+      # Build summary to be used with nac-test analysis
       - name: Build step summary
         if: always()
+        working-directory: .
         run: |
+          TOTAL="${{ steps.nactest.outputs.total }}"
+          PASSED="${{ steps.nactest.outputs.passed }}"
+          FAILED="${{ steps.nactest.outputs.failed }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           {
             echo '# Applied to APIC'
             echo ''
@@ -621,34 +769,87 @@ jobs:
             echo ''
             JOB="${{ needs.plan.outputs.nd_job_id }}"
             if [ -n "$JOB" ]; then
-              echo "🔗 [Pre-change analysis in Nexus Dashboard](https://${{ vars.ND_HOST }}${{ env.ND_PRECHANGE_UI_PATH }}/${{ vars.ND_FABRIC }}/${JOB})"
-            else
-              echo "🔗 [Nexus Dashboard analysis hub](https://${{ vars.ND_HOST }}/analysis-hub/pre-change-analysis)"
+              echo "🔗 [Pre-change analysis in Nexus Dashboard](${{ vars.ND_HOST }}${{ env.ND_PRECHANGE_UI_PATH }}/${{ vars.ND_FABRIC }}/${JOB})"
             fi
             echo ''
-            echo '## Nexus Dashboard post-change delta'
+            echo '---'
             echo ''
-            case "${{ steps.delta.outputs.exitcode }}" in
-              0) echo '✅ **No new critical or major anomalies** introduced by this change.' ;;
-              3) echo '⚠️ **New anomalies detected** after applying this change - see detail below.' ;;
-              2) echo 'ℹ️ Delta analysis did not complete (job failed or timed out).' ;;
-              *) echo "ℹ️ Delta did not complete (exit ${{ steps.delta.outputs.exitcode }})." ;;
-            esac
+            echo '## Post-change operational verification (nac-test)'
             echo ''
-            echo '<details><summary>Full delta report</summary>'
+            if [ "${FAILED:-0}" = "0" ] && [ "${TOTAL:-0}" != "0" ]; then
+              echo "✅ **All ${TOTAL} operational tests passed.** BGP peerings, vPC state, static paths and interfaces verified against the data model."
+            elif [ "${TOTAL:-0}" = "0" ]; then
+              echo "⚠️ **No tests ran** - check the nac-test step logs (template render or credential failure)."
+            else
+              echo "❌ **${FAILED} of ${TOTAL} operational tests failed.** The change is applied; investigate below."
+            fi
             echo ''
-            cat nd-delta.md 2>/dev/null || echo '_none_'
+            echo '| result | count |'
+            echo '| --- | --- |'
+            echo "| passed | ${PASSED:-0} |"
+            echo "| failed | ${FAILED:-0} |"
+            echo "| total | ${TOTAL:-0} |"
             echo ''
-            echo '</details>'
+            echo "📊 **[Download the full HTML report](${RUN_URL}#artifacts)** — open \`report.html\` for the interactive Robot Framework dashboard."
+            echo ''
+            echo "📊 **[Open the interactive test report](https://conmurphy.github.io/nac-webinar/reports/run-${{ github.run_number }}/)**"
+            echo ''
+            if [ -s nac-test-failures.md ]; then
+              echo '<details open><summary>Failed tests</summary>'
+              echo ''
+              cat nac-test-failures.md
+              echo ''
+              echo '</details>'
+            fi
+            echo ''
+            echo '> Fabric baseline tests (hardware, environmental, external reachability) run separately and are informational - they reflect pre-existing fabric state, not this change.'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload ND delta
+      # Upload artifacts when using ND Delta Analysis
+      # - name: Upload ND delta
+      #   if: always()
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: nd-delta
+      #     path: |
+      #       ${{ env.WORKING_DIR }}/nd-delta.md
+      #       ${{ env.WORKING_DIR }}/delta.raw
+      #     retention-days: 5
+      #     if-no-files-found: warn
+
+      # Upload artifacts when using nac-test analysis
+      - name: Upload nac-test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nd-delta
+          name: nac-test-reports
           path: |
-            ${{ env.WORKING_DIR }}/nd-delta.md
-            ${{ env.WORKING_DIR }}/delta.raw
-          retention-days: 5
+            nac-test-results/combined_summary.html
+            nac-test-results/robot_results/report.html
+            nac-test-results/robot_results/log.html
+            nac-test-results/robot_results/output.xml
+            nac-test-results/robot_results/xunit.xml
+            nac-test-baseline/robot_results/report.html
+            nac-test-baseline/robot_results/log.html
+            nac-test-failures.md
+          retention-days: 30
           if-no-files-found: warn
+      
+      - name: Publish report to Pages
+        if: always() && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        working-directory: .
+        run: |
+          DEST="reports/run-${{ github.run_number }}"
+          mkdir -p "gh-pages/${DEST}"
+          cp -r nac-test-results/robot_results/*.html "gh-pages/${DEST}/" || true
+          cp nac-test-results/combined_summary.html "gh-pages/${DEST}/index.html" || true
+
+      - name: Deploy to Pages
+        if: always() && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./gh-pages
+          keep_files: true

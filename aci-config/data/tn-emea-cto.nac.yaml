@@ -8,6 +8,7 @@ apic:
 
       vrfs:
         - name: vrf-conmurph-prod
+        - name: vrf-conmurph-prod
           
       bridge_domains:
         - name: 10.0.10.0_24
@@ -43,8 +44,8 @@ apic:
                   application_profile: conmurph-nac-network-segments
                 - endpoint_group: 10.0.20.0_24
                   application_profile: conmurph-nac-network-segments
-                - endpoint_group: 10.0.30.0_24
-                  application_profile: conmurph-nac-network-segments
+                # - endpoint_group: 10.0.30.0_24
+                #   application_profile: conmurph-nac-network-segments
               
               contracts:
                 providers:
@@ -124,3 +125,110 @@ apic:
                 - filter: conmurph-nac-all-protocols
                   log: true
   
+      l3outs:
+        - name: l3out-to-core-01
+          vrf: vrf-external
+          domain: emea-cto.routed-dom
+          bgp:
+            name: bgp-l3out-to-core
+
+          node_profiles:
+            - name: border-leafs
+              nodes:
+                - node_id: 1101
+                  router_id: 101.2.1.1
+                  router_id_as_loopback: false
+
+                - node_id: 1102
+                  router_id: 102.2.1.1
+                  router_id_as_loopback: false
+
+              interface_profiles:
+                - name: aci-site-01-pod-01-leaf-switches
+                  interfaces: 
+                    - node_id: 1101
+                      node2_id: 1102
+                      channel: vpc-routed-interfaces-to-core
+                      vlan: 1290
+                      svi: true
+                      ip_a: 172.16.1.210/29
+                      ip_b: 172.16.1.211/29
+                      ip_shared: 172.16.1.212/29
+                      bgp_peers:
+                      - ip: 172.16.1.209/29 
+                        local_as: 65521
+                        remote_as: 65500    
+
+          external_endpoint_groups:
+            - name: all-subnets
+              subnets:
+                - prefix: 0.0.0.0/1
+                - prefix: 128.0.0.0/1
+              contracts:
+                consumers:
+                  - permit-all-to-tenant-emea-cto   
+
+        - name: l3out-to-conmurph-ftdv-01
+          vrf: vrf-external
+          domain: emea-cto.routed-dom
+          bgp:
+            name: bgp-l3out-to-conmurph-ftdv-01
+          # ospf:
+          #   area: 0
+          #   area_type: regular
+          #   ospf_interface_profile_name: conmurph-ospf-to-ftdv
+          #   policy: conmurph-ospf-to-ftdv
+
+          node_profiles:
+            - name: border-leafs
+              nodes:
+                - node_id: 1101
+                  router_id: 101.2.1.1
+                  router_id_as_loopback: false
+
+                - node_id: 1102
+                  router_id: 102.2.1.1
+                  router_id_as_loopback: false
+
+              interface_profiles:
+                - name: aci-site-01-pod-01-leaf-switches
+                  # ospf:
+                  #   ospf_interface_profile_name: conmurph-ospf-to-ftdv
+                  interfaces: 
+                    - node_id: 1101
+                      node2_id: 1102
+                      channel: vpc-ucs-prod-01-6454-A
+                      vlan: 1299
+                      svi: true
+                      ip_a: 6.6.6.2/24
+                      ip_b: 6.6.6.3/24
+                      ip_shared: 6.6.6.1/24
+                      bgp_peers:
+                      - ip: 6.6.6.0/24
+                        # local_as: 65661
+                        remote_as: 65662   
+
+                    - node_id: 1101
+                      node2_id: 1102
+                      channel: vpc-ucs-prod-01-6454-B
+                      vlan: 1299
+                      svi: true
+                      ip_a: 6.6.6.2/24
+                      ip_b: 6.6.6.3/24
+                      ip_shared: 6.6.6.1/24
+                      bgp_peers:
+                      - ip: 6.6.6.0/24
+                        # local_as: 65661
+                        remote_as: 65662                                           
+
+          external_endpoint_groups:
+            - name: all-subnets
+              subnets:
+                # - prefix: 6.6.6.0/24
+                - prefix: 10.10.10.0/24
+                - prefix: 10.10.20.0/24
+              contracts:
+                consumers:
+                  - permit-all-to-tenant-emea-cto
+      
+        
