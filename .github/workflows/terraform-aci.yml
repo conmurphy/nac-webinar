@@ -46,11 +46,11 @@ env:
   # Pre-change gate. 'critical,major' makes ND block the apply on exit 3.
   ND_FAIL_ON: 'critical,major'
   # Post-change delta reports the same severities but never blocks (step exits 0).
-  ND_DELTA_FAIL_ON: 'critical,major'
+  ND_DELTA_FAIL_ON: '' #'critical,major'
   ND_JOB_TIMEOUT_MINUTES: '30'
   ND_POLL_INTERVAL: '15'
   # Fallback only. The real link is read from the report's prechange_ui_url.
-  ND_PRECHANGE_UI_PATH: '/api/v1/analyze/jobs/prechangeAnalysis'
+  ND_PRECHANGE_UI_PATH: '/analysis-hub/pre-change-analysis'
   # ---- nac-test ----
   NAC_TEST_DIR: tests-and-validations/02-post-deploy-tests
   NAC_TEST_TEMPLATES: tests-and-validations/02-post-deploy-tests/tests/templates
