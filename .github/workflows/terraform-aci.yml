@@ -320,7 +320,7 @@ jobs:
           esac
           exit 0
 
-      # ─────────── NEW: JSON fetch + filtered anomaly table ───────────
+      # ─────────── JSON fetch + filtered anomaly table ───────────
       # Re-reads the SAME completed job via --job-id. Nothing is re-analysed.
       # If --output json needs --report-file on your build, change the redirect.
       - name: ND anomaly context table
@@ -328,9 +328,11 @@ jobs:
         if: always() && steps.prechange.outputs.job_id != ''
         continue-on-error: true
         run: |
+          WANT_JOB="${{ steps.prechange.outputs.job_id }}"
+
           set +e
           nac-analytics nd prechange \
-            --job-id "${{ steps.prechange.outputs.job_id }}" \
+            --job-id "${WANT_JOB}" \
             --fail-on none \
             --output json \
             > nd-prechange.json 2> ndjson.err
@@ -341,16 +343,28 @@ jobs:
                   -e "more 'online' snapshot(s) exist" \
                   ndjson.err || true
 
-          # Guard against the malformed-JSON writer bug. If the payload is not
-          # valid JSON we skip the table rather than emit corrupted markdown.
-          if ! jq empty nd-prechange.json 2> jq-err.txt; then
-            echo "::warning::nd-prechange.json is not valid JSON - anomaly context skipped"
-            head -3 jq-err.txt || true
-            echo "_Anomaly context unavailable: the CLI emitted invalid JSON._" > nd-anomalies.md
+          fallback() {
+            echo "_$1_" > nd-anomalies.md
+            echo "::warning::anomaly context skipped - $1"
             exit 0
+          }
+
+          [ -s nd-prechange.json ] || fallback "the CLI produced no JSON output"
+
+          # Guard against the malformed-JSON writer bug.
+          if ! jq empty nd-prechange.json 2> jq-err.txt; then
+            head -3 jq-err.txt || true
+            fallback "the CLI emitted invalid JSON"
           fi
 
-          # Deep link straight from the report - do not hand-build the path.
+          # Confirm we re-read the gate's job rather than submitting a new one.
+          GOT_JOB="$(jq -r '.details.job_id // empty' nd-prechange.json)"
+          echo "gate job_id : ${WANT_JOB}"
+          echo "json job_id : ${GOT_JOB:-<none>}"
+          if [ -n "$GOT_JOB" ] && [ "$GOT_JOB" != "$WANT_JOB" ]; then
+            echo "::warning::JSON fetch returned job ${GOT_JOB}, not the gate's ${WANT_JOB} - --job-id may be submitting a NEW analysis"
+          fi
+
           ui="$(jq -r '.details.prechange_ui_url // empty' nd-prechange.json)"
           echo "ui_url=${ui}" >> "$GITHUB_OUTPUT"
           echo "ui_url: ${ui:-<none>}"
@@ -363,9 +377,14 @@ jobs:
           # is also unsafe: compliance and traffic noise both report
           # "telemetry". We filter on cleared / type / acknowledged only, and
           # label the result as context rather than delta.
-          jq -r '
+          #
+          # No backslash escapes in this program on purpose - they do not
+          # survive copy/paste reliably. The markdown pipe escape arrives via
+          # --arg so jq never parses it.
+          set +e
+          jq -r --arg pipe '\|' '
             def rank: {"critical":0,"major":1,"minor":2,"warning":3}[.] // 9;
-            def esc: tostring | gsub("\|"; "\|") | gsub("\n"; " ");
+            def esc: tostring | gsub("[|]"; $pipe) | gsub("[\n\r]+"; " ");
 
             (.delta_detail.anomalies.data.anomalies // []) as $all
             | ($all | length) as $total
@@ -400,13 +419,14 @@ jobs:
                   end )
               end
           ' nd-prechange.json > nd-anomalies.md
+          jqrc=$?
+          set -e
+          if [ "$jqrc" != "0" ] || [ ! -s nd-anomalies.md ]; then
+            fallback "the anomaly filter failed (jq exit ${jqrc})"
+          fi
 
-          # Surface the compliance truncation instead of hiding it.
-          enforced=$(jq -r '.compliance.enforced_rules // 0' nd-prechange.json)
-          configured=$(jq -r '.compliance.configuration_rules // 0' nd-prechange.json)
-          declared=$(jq -r '.compliance.violated_rules // 0' nd-prechange.json)
-          listed=$(jq -r '(.compliance.violating_rules // []) | length' nd-prechange.json)
-          echo "compliance: enforced=${enforced} configured=${configured} declared_violations=${declared} listed=${listed}"
+          cat nd-anomalies.md
+          exit 0
 
       - name: Tidy ND report
         id: ndclean
