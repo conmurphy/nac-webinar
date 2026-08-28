@@ -56,6 +56,9 @@ env:
   NAC_TEST_TEMPLATES: tests-and-validations/02-post-deploy-tests/tests/templates
   NAC_TEST_FILTERS: tests-and-validations/02-post-deploy-tests/tests/filters
   NAC_TEST_DEFAULTS: tests-and-validations/02-post-deploy-tests/tests/defaults
+  # Ensure SSH and other tools find a writable home. Observed under oc exec that
+  # HOME can resolve to '/', producing "Could not create directory '/.ssh'".
+  HOME: /home/runner
 
 permissions:
   contents: read
@@ -81,16 +84,18 @@ jobs:
       ND_USER:     ${{ secrets.ND_USER }}
       ND_PASSWORD: ${{ secrets.ND_PASSWORD }}
     outputs:
-      exitcode:    ${{ steps.plan.outputs.exitcode }}
-      summary:     ${{ steps.summary.outputs.line }}
-      nd_snapshot: ${{ steps.baseline.outputs.snapshot_id }}
-      nd_exitcode: ${{ steps.prechange.outputs.exitcode }}
-      nd_job_id:   ${{ steps.prechange.outputs.job_id }}
-      nd_critical: ${{ steps.prechange.outputs.critical }}
-      nd_major:    ${{ steps.prechange.outputs.major }}
-      nd_minor:    ${{ steps.prechange.outputs.minor }}
-      nd_warning:  ${{ steps.prechange.outputs.warning }}
-      nd_ui_url:   ${{ steps.ndcontext.outputs.ui_url }}
+      exitcode:        ${{ steps.plan.outputs.exitcode }}
+      summary:         ${{ steps.summary.outputs.line }}
+      nd_snapshot:     ${{ steps.baseline.outputs.snapshot_id }}
+      nd_exitcode:     ${{ steps.prechange.outputs.exitcode }}
+      nd_job_id:       ${{ steps.prechange.outputs.job_id }}
+      nd_critical:     ${{ steps.prechange.outputs.critical }}
+      nd_major:        ${{ steps.prechange.outputs.major }}
+      nd_minor:        ${{ steps.prechange.outputs.minor }}
+      nd_warning:      ${{ steps.prechange.outputs.warning }}
+      nd_ui_url:       ${{ steps.ndcontext.outputs.ui_url }}
+      changed_subnets: ${{ steps.changed.outputs.subnets }}
+      changed_bds:     ${{ steps.changed.outputs.bds }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -184,6 +189,51 @@ jobs:
             echo "_No plan JSON produced._" > plan-summary.md
           fi
           head -40 plan-summary.md
+
+      # ─────────── Change scoping for post-deploy tests ───────────
+      # The YAML data model is declarative and holds no notion of "new" - a BD
+      # added minutes ago is byte-identical to one added months ago. plan.json is
+      # the only place in this pipeline that knows what actually changed, so the
+      # subnet list is extracted here and handed to nac-test at runtime via
+      # CHANGED_SUBNETS. An empty list means the suite runs a full sweep.
+      - name: Extract changed subnets for post-deploy tests
+        id: changed
+        if: always()
+        run: |
+          if [ ! -f plan.json ]; then
+            echo "subnets=" >> "$GITHUB_OUTPUT"
+            echo "bds=" >> "$GITHUB_OUTPUT"
+            echo "no plan.json - post-deploy tests will run a full sweep"
+            exit 0
+          fi
+
+          # fvSubnet objects being created or updated. The DN carries both the BD
+          # name and the subnet CIDR, so one pass yields both lists. 'dn' can be
+          # unknown on creates, so fall back to content.ip.
+          jq -r '
+            .resource_changes[]
+            | select((.change.actions // []) | any(. == "create" or . == "update"))
+            | (.change.after // {}) as $a
+            | select(($a.class_name // "") == "fvSubnet")
+            | if (($a.dn // "") | test("/BD-[^/]+/subnet-\[")) then
+                ($a.dn | capture("/BD-(?<bd>[^/]+)/subnet-\[(?<ip>[^\]]+)\]")
+                        | "\(.bd)\t\(.ip)")
+              elif (($a.content.ip // "") != "") then
+                "unknown\t\($a.content.ip)"
+              else
+                empty
+              end
+          ' plan.json 2>/dev/null | sort -u > changed-subnets.tsv || true
+
+          SUBNETS="$(cut -f2 changed-subnets.tsv | paste -sd, - || true)"
+          BDS="$(cut -f1 changed-subnets.tsv | sort -u | paste -sd, - || true)"
+
+          echo "subnets=${SUBNETS}" >> "$GITHUB_OUTPUT"
+          echo "bds=${BDS}"         >> "$GITHUB_OUTPUT"
+          echo "changed subnets: ${SUBNETS:-<none - tests will run a full sweep>}"
+          echo "changed BDs    : ${BDS:-<none>}"
+          echo '--- changed-subnets.tsv ---'
+          cat changed-subnets.tsv || true
 
       - name: Prepare ND payload
         id: ndpayload
@@ -460,6 +510,7 @@ jobs:
           MIN="${{ steps.prechange.outputs.minor }}"
           WARN="${{ steps.prechange.outputs.warning }}"
           UI="${{ steps.ndcontext.outputs.ui_url }}"
+          SCOPE="${{ steps.changed.outputs.subnets }}"
           {
             echo "# ACI Change Analysis"
             echo ''
@@ -530,6 +581,8 @@ jobs:
             echo ''
             cat plan-summary.md 2>/dev/null || echo '_No summary._'
             echo ''
+            echo "**Post-deploy test scope:** \`${SCOPE:-all configured subnets (full sweep)}\`"
+            echo ''
             echo '<details><summary>Raw terraform plan output</summary>'
             echo ''
             echo '```hcl'
@@ -549,6 +602,7 @@ jobs:
             ${{ env.WORKING_DIR }}/tfplan.txt
             ${{ env.WORKING_DIR }}/plan.json
             ${{ env.WORKING_DIR }}/plan-summary.md
+            ${{ env.WORKING_DIR }}/changed-subnets.tsv
             ${{ env.WORKING_DIR }}/nd-prechange.md
             ${{ env.WORKING_DIR }}/nd-prechange-clean.md
             ${{ env.WORKING_DIR }}/nd-prechange.json
@@ -569,6 +623,7 @@ jobs:
           ND_CRITICAL:  ${{ steps.prechange.outputs.critical }}
           ND_MAJOR:     ${{ steps.prechange.outputs.major }}
           PLAN_SUMMARY: ${{ steps.summary.outputs.line }}
+          TEST_SCOPE:   ${{ steps.changed.outputs.subnets }}
         with:
           script: |
             const fs = require('fs');
@@ -590,6 +645,7 @@ jobs:
             const host    = process.env.ND_HOST     || '';
             const uiUrl   = process.env.ND_UI_URL   || '';
             const planSum = process.env.PLAN_SUMMARY || 'unknown';
+            const scope   = process.env.TEST_SCOPE || 'all configured subnets (full sweep)';
 
             const verdict = (crit === '0' && maj === '0')
               ? '✅ No new critical or major anomalies predicted.'
@@ -646,6 +702,8 @@ jobs:
               '',
               '### 2. Terraform plan',
               '',
+              '**Post-deploy test scope:** `' + scope + '`',
+              '',
               '<details><summary>Show plan</summary>',
               '',
               '```hcl',
@@ -660,7 +718,7 @@ jobs:
               repo: context.repo.repo,
               body: body.join('\n')
             });
-
+  
   # ══════════════════════════════════════════════════════════
   # JOB 2 — Apply + post-change verification
   # main only, blocks on required reviewers.
@@ -692,6 +750,7 @@ jobs:
           echo "ND baseline   : ${{ needs.plan.outputs.nd_snapshot }}"
           echo "ND prechange  : exit ${{ needs.plan.outputs.nd_exitcode }}"
           echo "ND anomalies  : ${{ needs.plan.outputs.nd_critical }} critical, ${{ needs.plan.outputs.nd_major }} major"
+          echo "Test scope    : ${{ needs.plan.outputs.changed_subnets || 'full sweep' }}"
           echo "Commit        : ${{ github.sha }}"
           echo "Triggered by  : ${{ github.actor }}"
 
@@ -709,6 +768,18 @@ jobs:
           echo "ND_FABRIC : ${ND_FABRIC:-<EMPTY>}"
           [ -n "$ND_USER" ]     && echo "ND_USER   : set"  || echo "::warning::ND_USER is EMPTY - add it to the aci-tenant-emea-cto environment"
           [ -n "$ND_PASSWORD" ] && echo "ND_PASSWORD: set" || echo "::warning::ND_PASSWORD is EMPTY - add it to the aci-tenant-emea-cto environment"
+
+      # The connectivity suite needs SSHLibrary (which pulls paramiko) and dig.
+      # Fail loudly here rather than letting every fabric test skip silently.
+      - name: Verify nac-test fabric test dependencies
+        continue-on-error: true
+        run: |
+          python3 -c "import SSHLibrary, paramiko; print('SSHLibrary', SSHLibrary.__version__, '/ paramiko', paramiko.__version__)" \
+            || echo "::warning::SSHLibrary/paramiko not importable - fabric iping tests will fail to load. Install robotframework-sshlibrary into the interpreter that runs Robot."
+          command -v dig >/dev/null && dig -v 2>&1 | head -1 \
+            || echo "::warning::dig is missing - resolver tests will skip"
+          command -v ping >/dev/null && echo "ping: present" \
+            || echo "::warning::ping is missing - runner gateway tests will skip"
 
       - name: Download plan
         uses: actions/download-artifact@v4
@@ -734,16 +805,34 @@ jobs:
           ACI_INSECURE: 'true'
 
       # ═══════════════ Post-change operational verification ═══════════════
+      # SWITCH_USER / SWITCH_PASSWORD are passed as ENVIRONMENT variables, not
+      # via --variable. Robot reads them with %{SWITCH_USER=} syntax. Passing a
+      # password with --variable would place it in the process command line,
+      # readable via /proc by anything in the same container.
+      #
+      # --processes 2 caps the SSH fan-out. ACI leaves limit concurrent sessions
+      # per user, and exceeding it produces failures that look like fabric faults.
+      #
+      # NOTE: --exclude fabric-ping is deliberately ABSENT. The runner has L3Out
+      # reachability to these public BD gateways, so that test is a real
+      # bidirectional check and should gate.
       - name: nac-test - change verification
         id: nactest
         continue-on-error: true
         working-directory: .
         env:
-          ACI_URL:      ${{ secrets.APIC_URL }}
-          ACI_USERNAME: ${{ secrets.APIC_USERNAME }}
-          ACI_PASSWORD: ${{ secrets.APIC_PASSWORD }}
-          PYTHONWARNINGS: 'ignore:Unverified HTTPS request'
+          ACI_URL:         ${{ secrets.APIC_URL }}
+          ACI_USERNAME:    ${{ secrets.APIC_USERNAME }}
+          ACI_PASSWORD:    ${{ secrets.APIC_PASSWORD }}
+          SWITCH_USER:     ${{ secrets.APIC_USERNAME }}
+          SWITCH_PASSWORD: ${{ secrets.APIC_PASSWORD }}
+          PYTHONWARNINGS:  'ignore:Unverified HTTPS request'
         run: |
+          echo "test scope   : ${{ needs.plan.outputs.changed_subnets || '<full sweep>' }}"
+          echo "node map     : ${{ vars.NODE_MGMT_MAP || '<EMPTY - fabric tests will skip>' }}"
+          [ -n "$SWITCH_USER" ] && echo "SWITCH_USER  : set" \
+            || echo "::warning::SWITCH_USER is empty - fabric iping tests will skip"
+
           set +e
           nac-test \
             -d "${WORKING_DIR}/data" \
@@ -752,28 +841,31 @@ jobs:
             -f "${NAC_TEST_FILTERS}" \
             -o nac-test-results \
             --exclude baseline \
-            --exclude fabric-ping \
-            --minimal-reports
+            --processes 2 \
+            --minimal-reports \
+            --variable NODE_MGMT_MAP:${{ vars.NODE_MGMT_MAP }} \
+            --variable CHANGED_SUBNETS:${{ needs.plan.outputs.changed_subnets }}
           code=$?
           set -e
           echo "exitcode=$code" >> "$GITHUB_OUTPUT"
 
-          # Parse real per-test results from output.xml
+          # Parse real per-test results from output.xml. Skipped tests are
+          # neither passed nor failed - count them so the summary can state how
+          # much was actually verified rather than implying full coverage.
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import xml.etree.ElementTree as ET, os, sys
+          import xml.etree.ElementTree as ET, sys
           try:
               t = ET.parse('nac-test-results/robot_results/output.xml')
           except Exception:
-              print("total=0"); print("passed=0"); print("failed=0")
+              print("total=0"); print("passed=0"); print("failed=0"); print("skipped=0")
               sys.exit(0)
           tests = list(t.iter('test'))
-          passed = sum(1 for x in tests
-                       if x.find('status').get('status') == 'PASS')
-          failed = sum(1 for x in tests
-                       if x.find('status').get('status') == 'FAIL')
+          def n(s):
+              return sum(1 for x in tests if x.find('status').get('status') == s)
           print(f"total={len(tests)}")
-          print(f"passed={passed}")
-          print(f"failed={failed}")
+          print(f"passed={n('PASS')}")
+          print(f"failed={n('FAIL')}")
+          print(f"skipped={n('SKIP')}")
           PY
 
           echo "nac-test exit ${code}"
@@ -784,10 +876,12 @@ jobs:
         continue-on-error: true
         working-directory: .
         env:
-          ACI_URL:      ${{ secrets.APIC_URL }}
-          ACI_USERNAME: ${{ secrets.APIC_USERNAME }}
-          ACI_PASSWORD: ${{ secrets.APIC_PASSWORD }}
-          PYTHONWARNINGS: 'ignore:Unverified HTTPS request'
+          ACI_URL:         ${{ secrets.APIC_URL }}
+          ACI_USERNAME:    ${{ secrets.APIC_USERNAME }}
+          ACI_PASSWORD:    ${{ secrets.APIC_PASSWORD }}
+          SWITCH_USER:     ${{ secrets.SWITCH_USER }}
+          SWITCH_PASSWORD: ${{ secrets.SWITCH_PASSWORD }}
+          PYTHONWARNINGS:  'ignore:Unverified HTTPS request'
         run: |
           set +e
           nac-test \
@@ -797,7 +891,9 @@ jobs:
             -f "${NAC_TEST_FILTERS}" \
             -o nac-test-baseline \
             --include baseline \
-            --minimal-reports
+            --processes 2 \
+            --minimal-reports \
+            --variable NODE_MGMT_MAP:${{ vars.NODE_MGMT_MAP }}
           code=$?
           set -e
           echo "exitcode=$code" >> "$GITHUB_OUTPUT"
@@ -843,6 +939,8 @@ jobs:
           TOTAL="${{ steps.nactest.outputs.total }}"
           PASSED="${{ steps.nactest.outputs.passed }}"
           FAILED="${{ steps.nactest.outputs.failed }}"
+          SKIPPED="${{ steps.nactest.outputs.skipped }}"
+          SCOPE="${{ needs.plan.outputs.changed_subnets }}"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           UI="${{ needs.plan.outputs.nd_ui_url }}"
           {
@@ -858,18 +956,25 @@ jobs:
             echo ''
             echo '## Post-change operational verification (nac-test)'
             echo ''
+            echo "Scope: \`${SCOPE:-all configured subnets (full sweep)}\`"
+            echo ''
             if [ "${FAILED:-0}" = "0" ] && [ "${TOTAL:-0}" != "0" ]; then
-              echo "✅ **All ${TOTAL} operational tests passed.** BGP peerings, vPC state, static paths and interfaces verified against the data model."
+              echo "✅ **${PASSED:-0} of ${TOTAL} operational tests passed.** Fabric-sourced ICMP from each BD anycast gateway (iping on a border leaf, inside the tenant VRF), runner-sourced reachability to those same gateways over the L3Out, shared-services DNS resolution and outbound HTTPS."
             elif [ "${TOTAL:-0}" = "0" ]; then
-              echo "⚠️ **No tests ran** - check the nac-test step logs (template render or credential failure)."
+              echo "⚠️ **No tests ran** - check the nac-test step logs (template render, missing SSHLibrary, or credential failure)."
             else
               echo "❌ **${FAILED} of ${TOTAL} operational tests failed.** The change is applied; investigate below."
+            fi
+            if [ "${SKIPPED:-0}" != "0" ]; then
+              echo ''
+              echo "ℹ️ ${SKIPPED} test(s) skipped - either outside the change scope, or NODE_MGMT_MAP / SWITCH_USER not configured. Skipped tests verified nothing."
             fi
             echo ''
             echo '| result | count |'
             echo '| --- | --- |'
             echo "| passed | ${PASSED:-0} |"
             echo "| failed | ${FAILED:-0} |"
+            echo "| skipped | ${SKIPPED:-0} |"
             echo "| total | ${TOTAL:-0} |"
             echo ''
             echo "📊 **[Download the full HTML report](${RUN_URL}#artifacts)** — open \`report.html\` for the interactive Robot Framework dashboard."
@@ -884,7 +989,7 @@ jobs:
               echo '</details>'
             fi
             echo ''
-            echo '> Fabric baseline tests (hardware, environmental, external reachability) run separately and are informational - they reflect pre-existing fabric state, not this change.'
+            echo '> Fabric baseline tests (management-VRF reachability, external HTTPS, name resolution) run separately and are informational - they reflect pre-existing fabric and upstream state, not this change.'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload nac-test reports
