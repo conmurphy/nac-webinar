@@ -113,6 +113,8 @@ def main(path):
         before = ch.get("before") or {}
         cls = (after.get("class_name") or before.get("class_name")
                or rc.get("type") or "?")
+        if not cls or cls == "?":
+            continue
         dn = after.get("dn") or before.get("dn") or rc.get("address") or ""
         rows.append((classify(actions), cls, dn))
 

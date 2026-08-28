@@ -191,8 +191,8 @@ jobs:
           #  Rn 'rsnodeL3OutAtt-[topology/pod-1/node-1101]' does not match expected
           #  rn 'rsnodeL3OutAtt-[[topology/pod-1/node-1101]]'
           # going to drop it so the test passes for the demo
-          DROP='["l3extRsNodeL3OutAtt"]'
-          jq --argjson drop "$DROP" '
+          DROP='["l3extRsNodeL3OutAtt","l3extLNodeP","l3extLIfP","l3extRsPathL3OutAtt","l3extMember","l3extIp","bgpPeerP","bgpAsP","bgpLocalAsnP"]'
+          jq -c --argjson drop "$DROP" '
             .resource_changes |= map(
               select(
                 ((.change.after.class_name // .change.before.class_name // "")
@@ -248,12 +248,12 @@ jobs:
         run: |
           BASELINE="${{ steps.baseline.outputs.snapshot_id }}"
           [ -n "$BASELINE" ] || BASELINE="latest"
-          echo "analysing plan.json against baseline: ${BASELINE}"
+          echo "analysing plan-nd.json against baseline: ${BASELINE}"
 
           # NOTE: --report-file applies to JUnit output only.
           # With --output markdown the report goes to STDOUT.
           set +e
-          nac-analytics nd prechange plan.json "$BASELINE" \
+          nac-analytics nd prechange plan-nd.json "$BASELINE" \
             --fail-on "${ND_FAIL_ON}" \
             --detail full \
             --output markdown \
@@ -298,13 +298,12 @@ jobs:
           job_id="$(awk -F'|' '$2 ~ /^ *job_id *$/ {gsub(/^ +| +$/,"",$3); print $3; exit}' nd-prechange.md)"
           echo "job_id=${job_id}" >> "$GITHUB_OUTPUT"
           echo "job_id: ${job_id:-<none>}"
+          echo "gate_ran=true" >> "$GITHUB_OUTPUT"
 
           case "$code" in
             0) echo "ND: no new anomalies at or above ${ND_FAIL_ON}" ;;
             2) echo "::warning::ND analysis job failed, stopped, or timed out" ;;
             3) echo "::error::ND predicts new ${ND_FAIL_ON} anomalies - blocking apply"
-               exit 1 ;;
-            # 4) echo "::error::ND rejected the candidate configuration (bad input)"
                exit 1 ;;
             4) echo "::warning::ND rejected the configuration (possible bad input) - the pre-change analysis did NOT finish for this change so review the plan manually before approving."
                echo "gate_ran=false" >> "$GITHUB_OUTPUT" ;;
@@ -347,6 +346,7 @@ jobs:
               echo "Baseline snapshot: \`${{ steps.baseline.outputs.snapshot_id || 'latest' }}\`"
               echo ''
               JOB="${{ steps.prechange.outputs.job_id }}"
+              nd_gate_ran: ${{ steps.prechange.outputs.gate_ran }}
               if [ -n "$JOB" ]; then
                 echo "🔗 [Open this pre-change analysis in Nexus Dashboard](${{ vars.ND_HOST }}${{ env.ND_PRECHANGE_UI_PATH }}/${{ vars.ND_FABRIC }}/${JOB})"
               else
