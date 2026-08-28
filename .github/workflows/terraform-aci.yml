@@ -49,7 +49,8 @@ env:
   ND_DELTA_FAIL_ON: 'critical,major'
   ND_JOB_TIMEOUT_MINUTES: '30'
   ND_POLL_INTERVAL: '15'
-  ND_PRECHANGE_UI_PATH: '/analysis-hub/pre-change-analysis/view'
+  # Fallback only. The real link is read from the report's prechange_ui_url.
+  ND_PRECHANGE_UI_PATH: '/api/v1/analyze/jobs/prechangeAnalysis'
   # ---- nac-test ----
   NAC_TEST_DIR: tests-and-validations/02-post-deploy-tests
   NAC_TEST_TEMPLATES: tests-and-validations/02-post-deploy-tests/tests/templates
@@ -89,6 +90,7 @@ jobs:
       nd_major:    ${{ steps.prechange.outputs.major }}
       nd_minor:    ${{ steps.prechange.outputs.minor }}
       nd_warning:  ${{ steps.prechange.outputs.warning }}
+      nd_ui_url:   ${{ steps.ndcontext.outputs.ui_url }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -106,6 +108,7 @@ jobs:
         run: |
           terraform version
           nac-analytics version
+          jq --version
           echo "ND_HOST   : ${ND_HOST:-<EMPTY>}"
           echo "ND_FABRIC : ${ND_FABRIC:-<EMPTY>}"
           [ -n "$ND_USER" ]     && echo "ND_USER   : set"     || echo "ND_USER   : <EMPTY>"
@@ -169,7 +172,7 @@ jobs:
           fi
           echo "line=${line}" >> "$GITHUB_OUTPUT"
           echo "$line"
-      
+
       - name: Build plan change table
         id: plantable
         if: always()
@@ -181,12 +184,12 @@ jobs:
             echo "_No plan JSON produced._" > plan-summary.md
           fi
           head -40 plan-summary.md
-      
+
       - name: Prepare ND payload
         id: ndpayload
         if: steps.plan.outputs.exitcode == '2'
         run: |
-          # this was the error from ND which failed 
+          # this was the error from ND which failed
           # ND wants double brackets; the plan produced single.
           #  Rn 'rsnodeL3OutAtt-[topology/pod-1/node-1101]' does not match expected
           #  rn 'rsnodeL3OutAtt-[[topology/pod-1/node-1101]]'
@@ -227,8 +230,11 @@ jobs:
           rc=$?
           set -e
 
+          # FIXED: was grepping prechange.err, which does not exist in this step.
           echo "--- CLI diagnostics (stderr) ---"
-          cat snap.err || true
+          grep -v -e "TLS certificate verification is disabled" \
+                  -e "more 'online' snapshot(s) exist" \
+                  snap.err || true
           echo "--------------------------------"
 
           # The snapshot ID is the ONLY thing on stdout.
@@ -314,6 +320,116 @@ jobs:
           esac
           exit 0
 
+      # ─────────── NEW: JSON fetch + filtered anomaly table ───────────
+      # Re-reads the SAME completed job via --job-id. Nothing is re-analysed.
+      # If --output json needs --report-file on your build, change the redirect.
+      - name: ND anomaly context table
+        id: ndcontext
+        if: always() && steps.prechange.outputs.job_id != ''
+        continue-on-error: true
+        run: |
+          set +e
+          nac-analytics nd prechange \
+            --job-id "${{ steps.prechange.outputs.job_id }}" \
+            --fail-on none \
+            --output json \
+            > nd-prechange.json 2> ndjson.err
+          rc=$?
+          set -e
+          echo "json fetch rc=${rc}"
+          grep -v -e "TLS certificate verification is disabled" \
+                  -e "more 'online' snapshot(s) exist" \
+                  ndjson.err || true
+
+          # Guard against the malformed-JSON writer bug. If the payload is not
+          # valid JSON we skip the table rather than emit corrupted markdown.
+          if ! jq empty nd-prechange.json 2> jq-err.txt; then
+            echo "::warning::nd-prechange.json is not valid JSON - anomaly context skipped"
+            head -3 jq-err.txt || true
+            echo "_Anomaly context unavailable: the CLI emitted invalid JSON._" > nd-anomalies.md
+            exit 0
+          fi
+
+          # Deep link straight from the report - do not hand-build the path.
+          ui="$(jq -r '.details.prechange_ui_url // empty' nd-prechange.json)"
+          echo "ui_url=${ui}" >> "$GITHUB_OUTPUT"
+          echo "ui_url: ${ui:-<none>}"
+
+          # Signal filter.
+          #
+          # NO TIMESTAMP CUTOFF. Compliance violations carry the epoch of rule
+          # import (2026-08-24), not of submission, so a time filter would drop
+          # the very anomalies that block the gate. Filtering on anomalySource
+          # is also unsafe: compliance and traffic noise both report
+          # "telemetry". We filter on cleared / type / acknowledged only, and
+          # label the result as context rather than delta.
+          jq -r '
+            def rank: {"critical":0,"major":1,"minor":2,"warning":3}[.] // 9;
+            def esc: tostring | gsub("\|"; "\|") | gsub("\n"; " ");
+
+            (.delta_detail.anomalies.data.anomalies // []) as $all
+            | ($all | length) as $total
+            | ($all | map(select((.cleared // false) == true)) | length) as $cleared
+            | ($all | map(select(.anomalyType == "TRAFFIC_ANALYTICS")) | length) as $traffic
+            | ($all | map(select((.acknowledged // false) == true)) | length) as $acked
+            | ($all
+                | map(select((.cleared // false) == false))
+                | map(select(.anomalyType != "TRAFFIC_ANALYTICS"))
+                | map(select((.acknowledged // false) == false))
+                | sort_by(.severity | rank)
+              ) as $sig
+            | if $total == 0 then
+                "_No anomaly detail returned by this endpoint._"
+              else
+                "Fabric-wide anomaly state, filtered for signal. **This is context, not change impact** - the authoritative new-anomaly counts are in the severity table above.",
+                "",
+                "Suppressed \($cleared) cleared, \($traffic) traffic-analytics, \($acked) acknowledged, out of \($total) records.",
+                "",
+                ( if ($sig | length) == 0 then
+                    "_No active, unacknowledged, non-telemetry anomalies._"
+                  else
+                    "| severity | category | rule / entity | detail |",
+                    "| --- | --- | --- | --- |",
+                    ( $sig[] |
+                      "| \(.severity | esc) | \(.category | esc) | \(
+                         if (.ruleName // "") != "" then (.ruleName | esc)
+                         elif (.entityName // "") != "" then (.entityName | esc)
+                         else "-" end
+                       ) | \(.anomalyString | esc) |"
+                    )
+                  end )
+              end
+          ' nd-prechange.json > nd-anomalies.md
+
+          # Surface the compliance truncation instead of hiding it.
+          enforced=$(jq -r '.compliance.enforced_rules // 0' nd-prechange.json)
+          configured=$(jq -r '.compliance.configuration_rules // 0' nd-prechange.json)
+          declared=$(jq -r '.compliance.violated_rules // 0' nd-prechange.json)
+          listed=$(jq -r '(.compliance.violating_rules // []) | length' nd-prechange.json)
+          echo "compliance: enforced=${enforced} configured=${configured} declared_violations=${declared} listed=${listed}"
+
+          : > nd-compliance-warnings.md
+          if [ "${listed}" -lt "${declared}" ]; then
+            echo "::warning::Compliance report truncated: ${declared} violated rules declared, ${listed} returned. Needs paging in the nac-analytics compliance read path."
+            echo "- ⚠️ Compliance list is **incomplete**: ${declared} violated rules declared, only ${listed} returned. The CLI's compliance read path is not paging." >> nd-compliance-warnings.md
+          fi
+          if [ "${enforced}" -lt "${configured}" ]; then
+            echo "::warning::${configured} configuration rules exist but only ${enforced} are enforced. Unenforced rules pass silently."
+            echo "- ⚠️ **$(( configured - enforced )) of ${configured}** configuration rules are not enforced and therefore cannot fail this gate." >> nd-compliance-warnings.md
+          fi
+          cat nd-anomalies.md
+
+      - name: Tidy ND report
+        id: ndclean
+        if: always()
+        run: |
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/nd_report_clean.py" \
+            nd-prechange.md \
+            --clean-out nd-prechange-clean.md \
+            --violations-out nd-violations.md
+          echo '--- violations ---'
+          cat nd-violations.md
+
       # Fetch the SAME completed analysis as JUnit for archival.
       # --job-id means ND does not re-run anything.
       - name: ND JUnit report
@@ -334,6 +450,7 @@ jobs:
           MAJ="${{ steps.prechange.outputs.major }}"
           MIN="${{ steps.prechange.outputs.minor }}"
           WARN="${{ steps.prechange.outputs.warning }}"
+          UI="${{ steps.ndcontext.outputs.ui_url }}"
           {
             echo "# ACI Change Analysis"
             echo ''
@@ -345,13 +462,7 @@ jobs:
               echo ''
               echo "Baseline snapshot: \`${{ steps.baseline.outputs.snapshot_id || 'latest' }}\`"
               echo ''
-              JOB="${{ steps.prechange.outputs.job_id }}"
-              if [ -n "$JOB" ]; then
-                echo "🔗 [Open this pre-change analysis in Nexus Dashboard](${{ vars.ND_HOST }}${{ env.ND_PRECHANGE_UI_PATH }}/${{ vars.ND_FABRIC }}/${JOB})"
-              else
-                echo "🔗 [Open Nexus Dashboard analysis hub](${{ vars.ND_HOST }}/analysis-hub/pre-change-analysis)"
-              fi
-              echo ''
+              echo "🔗 [Nexus Dashboard pre-change analysis hub](${{ vars.ND_HOST }}${{ env.ND_PRECHANGE_UI_PATH }})"
               echo ''
               if [ "${CRIT:-0}" = "0" ] && [ "${MAJ:-0}" = "0" ]; then
                 echo '✅ **No new critical or major anomalies predicted** for this change.'
@@ -368,9 +479,29 @@ jobs:
               echo "| minor | ${MIN:-0} |"
               echo "| warning | ${WARN:-0} |"
               echo ''
+              if [ -s nd-violations.md ]; then
+                echo '### Compliance rules violated'
+                echo ''
+                cat nd-violations.md
+                echo ''
+              fi
+              if [ -s nd-compliance-warnings.md ]; then
+                echo '#### Compliance reporting caveats'
+                echo ''
+                cat nd-compliance-warnings.md
+                echo ''
+              fi
+              if [ -s nd-anomalies.md ]; then
+                echo '<details><summary>Fabric anomaly context (filtered)</summary>'
+                echo ''
+                cat nd-anomalies.md
+                echo ''
+                echo '</details>'
+                echo ''
+              fi
               echo '<details><summary>Full Nexus Dashboard report</summary>'
               echo ''
-              cat nd-prechange.md
+              cat nd-prechange-clean.md 2>/dev/null || cat nd-prechange.md
               echo ''
               echo '</details>'
               echo ''
@@ -408,7 +539,12 @@ jobs:
             ${{ env.WORKING_DIR }}/tfplan
             ${{ env.WORKING_DIR }}/tfplan.txt
             ${{ env.WORKING_DIR }}/plan.json
+            ${{ env.WORKING_DIR }}/plan-summary.md
             ${{ env.WORKING_DIR }}/nd-prechange.md
+            ${{ env.WORKING_DIR }}/nd-prechange-clean.md
+            ${{ env.WORKING_DIR }}/nd-prechange.json
+            ${{ env.WORKING_DIR }}/nd-anomalies.md
+            ${{ env.WORKING_DIR }}/nd-violations.md
             ${{ env.WORKING_DIR }}/prechange-report.xml
           retention-days: 5
           if-no-files-found: warn
@@ -420,6 +556,7 @@ jobs:
           ND_HOST:      ${{ vars.ND_HOST }}
           ND_FABRIC:    ${{ vars.ND_FABRIC }}
           ND_JOB_ID:    ${{ steps.prechange.outputs.job_id }}
+          ND_UI_URL:    ${{ steps.ndcontext.outputs.ui_url }}
           ND_CRITICAL:  ${{ steps.prechange.outputs.critical }}
           ND_MAJOR:     ${{ steps.prechange.outputs.major }}
           PLAN_SUMMARY: ${{ steps.summary.outputs.line }}
@@ -432,29 +569,28 @@ jobs:
               catch { return fallback; }
             };
 
-            let nd   = read('nd-prechange.md', '_No ND report._');
+            let nd = read('nd-prechange-clean.md', read('nd-prechange.md', '_No ND report._'));
             let plan = read('tfplan.txt', '_No plan output._');
+            const anomalies = read('nd-anomalies.md', '');
+            const caveats   = read('nd-compliance-warnings.md', '');
             if (nd.length   > 30000) nd   = nd.slice(0, 30000)   + '\n... truncated';
             if (plan.length > 30000) plan = plan.slice(0, 30000) + '\n... truncated';
 
             const crit    = process.env.ND_CRITICAL || '0';
             const maj     = process.env.ND_MAJOR    || '0';
             const host    = process.env.ND_HOST     || '';
-            const fabric  = process.env.ND_FABRIC   || '';
-            const jobId   = process.env.ND_JOB_ID   || '';
+            const uiUrl   = process.env.ND_UI_URL   || '';
             const planSum = process.env.PLAN_SUMMARY || 'unknown';
 
             const verdict = (crit === '0' && maj === '0')
               ? '✅ No new critical or major anomalies predicted.'
               : `⚠️ Predicted to introduce ${crit} critical and ${maj} major anomalies.`;
 
-            // Deep link to this specific analysis; fall back to the hub if the
-            // job never reached ND (prechange failed before submission).
-            const ndLink = (host && fabric && jobId)
-              ? `🔗 [View this analysis in Nexus Dashboard](${host}/analysis-hub/pre-change-analysis/view/${fabric}/${jobId})`
-              : (host
-                  ? `🔗 [Nexus Dashboard analysis hub](${host}/analysis-hub/pre-change-analysis)`
-                  : '');
+            // Prefer the URL the report itself reports; the hand-built path
+            // does not match this ND build.
+            const ndLink = uiUrl
+              ? `🔗 [View this analysis in Nexus Dashboard](${uiUrl})`
+              : (host ? `🔗 [Nexus Dashboard analysis hub](${host})` : '');
 
             const body = [
               '## ACI Change Analysis',
@@ -466,16 +602,32 @@ jobs:
               verdict,
             ];
 
-            if (ndLink) {
-              body.push('', ndLink);
-            }
+            if (ndLink) body.push('', ndLink);
 
             body.push(
               '',
               '| severity | new |',
               '| --- | --- |',
               `| critical | ${crit} |`,
-              `| major | ${maj} |`,
+              `| major | ${maj} |`
+            );
+
+            if (caveats.trim()) {
+              body.push('', '#### Compliance reporting caveats', '', caveats.trim());
+            }
+
+            if (anomalies.trim()) {
+              body.push(
+                '',
+                '<details><summary>Fabric anomaly context (filtered)</summary>',
+                '',
+                anomalies.trim(),
+                '',
+                '</details>'
+              );
+            }
+
+            body.push(
               '',
               '<details><summary>Full ND report</summary>',
               '',
@@ -501,7 +653,7 @@ jobs:
             });
 
   # ══════════════════════════════════════════════════════════
-  # JOB 2 — Apply + post-change delta
+  # JOB 2 — Apply + post-change verification
   # main only, blocks on required reviewers.
   # ══════════════════════════════════════════════════════════
   apply:
@@ -571,79 +723,6 @@ jobs:
           ACI_USERNAME: ${{ secrets.APIC_USERNAME }}
           ACI_PASSWORD: ${{ secrets.APIC_PASSWORD }}
           ACI_INSECURE: 'true'
-
-      # - name: ND post-change delta
-      #   id: delta
-      #   continue-on-error: true
-      #   run: |
-      #     # A fresh snapshot is required.
-      #     echo "Triggering post-change assurance analysis (several minutes)"
-      #     POST=""
-      #     for attempt in 1 2; do
-      #       set +e
-      #       nac-analytics nd analyze --output text > post.out 2> post.err
-      #       rc=$?
-      #       set -e
-      #       echo "--- analyze attempt ${attempt} (rc=${rc}) stderr ---"
-      #       cat post.err || true
-      #       echo "----------------------------------------------------"
-      #       POST="$(tail -n1 post.out | tr -d '[:space:]')"
-      #       [ -n "$POST" ] && break
-      #       if [ "$attempt" = "1" ]; then
-      #         echo "::warning::analyze returned no snapshot ID; retrying in 60s"
-      #         sleep 60
-      #       fi
-      #     done
-
-      #     PRE="${{ needs.plan.outputs.nd_snapshot }}"
-      #     echo "pre  snapshot: ${PRE:-<none>}"
-      #     echo "post snapshot: ${POST:-<none>}"
-
-      #     # Degrade rather than skip. 'nd delta' with no args compares
-      #     # latest-1 vs latest, which is correct right after apply + analyze.
-      #     if [ -n "$PRE" ] && [ -n "$POST" ]; then
-      #       ARGS=("$PRE" "$POST")
-      #       echo "comparing pinned pre vs pinned post"
-      #     elif [ -n "$POST" ]; then
-      #       ARGS=("latest-1" "$POST")
-      #       echo "::warning::No pinned baseline - comparing latest-1 vs the new post snapshot"
-      #     else
-      #       ARGS=()
-      #       echo "::warning::No snapshot IDs available - falling back to latest-1 vs latest"
-      #     fi
-
-      #     # Same as prechange: markdown goes to STDOUT, --report-file is JUnit only
-      #     set +e
-      #     nac-analytics nd delta "${ARGS[@]}" \
-      #       --fail-on "${ND_DELTA_FAIL_ON}" \
-      #       --detail full \
-      #       --output markdown \
-      #       > delta.raw 2> delta.err
-      #     code=$?
-      #     set -e
-
-      #     echo "--- CLI diagnostics (stderr) ---"
-      #     cat delta.err || true
-      #     echo "--------------------------------"
-      #     cat delta.raw || true
-
-      #     echo "exitcode=$code" >> "$GITHUB_OUTPUT"
-
-      #     sed -n '/^# /,$p' delta.raw > nd-delta.md || true
-      #     [ -s nd-delta.md ] || \
-      #       echo "_No delta report produced (exit ${code})._" > nd-delta.md
-
-      #     case "$code" in
-      #       0) echo "ND delta: no new ${ND_DELTA_FAIL_ON} anomalies" ;;
-      #       2) echo "::warning::ND delta job failed, stopped, or timed out" ;;
-      #       3) echo "::warning::ND delta found new ${ND_DELTA_FAIL_ON} anomalies" ;;
-      #       4) echo "::error::ND rejected the delta request (bad input)" ;;
-      #       5) echo "::error::ND authentication or authorisation failure" ;;
-      #       *) echo "::warning::ND delta unexpected exit ${code}" ;;
-      #     esac
-      #     # Never fail the job - the change is already applied
-      #     exit 0
-
 
       # ═══════════════ Post-change operational verification ═══════════════
       - name: nac-test - change verification
@@ -747,42 +826,7 @@ jobs:
               print('_All tests passed._')
           PY
           cat nac-test-failures.md
-      
-      # Build summary to be used with Nexus Dashboard Delta Analysis
-      # - name: Build step summary
-      #   if: always()
-      #   run: |
-      #     {
-      #       echo '# Applied to APIC'
-      #       echo ''
-      #       echo "Plan applied: **${{ needs.plan.outputs.summary }}**"
-      #       echo ''
-      #       echo "Pre-change prediction: ${{ needs.plan.outputs.nd_critical }} critical, ${{ needs.plan.outputs.nd_major }} major"
-      #       echo ''
-      #       JOB="${{ needs.plan.outputs.nd_job_id }}"
-      #       if [ -n "$JOB" ]; then
-      #         echo "🔗 [Pre-change analysis in Nexus Dashboard](${{ vars.ND_HOST }}${{ env.ND_PRECHANGE_UI_PATH }}/${{ vars.ND_FABRIC }}/${JOB})"
-      #       else
-      #         echo "🔗 [Nexus Dashboard analysis hub](${{ vars.ND_HOST }}/analysis-hub/pre-change-analysis)"
-      #       fi
-      #       echo ''
-      #       echo '## Nexus Dashboard post-change delta'
-      #       echo ''
-      #       case "${{ steps.delta.outputs.exitcode }}" in
-      #         0) echo '✅ **No new critical or major anomalies** introduced by this change.' ;;
-      #         3) echo '⚠️ **New anomalies detected** after applying this change - see detail below.' ;;
-      #         2) echo 'ℹ️ Delta analysis did not complete (job failed or timed out).' ;;
-      #         *) echo "ℹ️ Delta did not complete (exit ${{ steps.delta.outputs.exitcode }})." ;;
-      #       esac
-      #       echo ''
-      #       echo '<details><summary>Full delta report</summary>'
-      #       echo ''
-      #       cat nd-delta.md 2>/dev/null || echo '_none_'
-      #       echo ''
-      #       echo '</details>'
-      #     } >> "$GITHUB_STEP_SUMMARY"
 
-      # Build summary to be used with nac-test analysis
       - name: Build step summary
         if: always()
         working-directory: .
@@ -791,6 +835,7 @@ jobs:
           PASSED="${{ steps.nactest.outputs.passed }}"
           FAILED="${{ steps.nactest.outputs.failed }}"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          UI="${{ needs.plan.outputs.nd_ui_url }}"
           {
             echo '# Applied to APIC'
             echo ''
@@ -798,10 +843,7 @@ jobs:
             echo ''
             echo "Pre-change prediction: ${{ needs.plan.outputs.nd_critical }} critical, ${{ needs.plan.outputs.nd_major }} major"
             echo ''
-            JOB="${{ needs.plan.outputs.nd_job_id }}"
-            if [ -n "$JOB" ]; then
-              echo "🔗 [Pre-change analysis in Nexus Dashboard](${{ vars.ND_HOST }}${{ env.ND_PRECHANGE_UI_PATH }}/${{ vars.ND_FABRIC }}/${JOB})"
-            fi
+            echo "🔗 [Nexus Dashboard analysis hub](${{ vars.ND_HOST }}${{ env.ND_PRECHANGE_UI_PATH }})"
             echo ''
             echo '---'
             echo ''
@@ -836,19 +878,6 @@ jobs:
             echo '> Fabric baseline tests (hardware, environmental, external reachability) run separately and are informational - they reflect pre-existing fabric state, not this change.'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Upload artifacts when using ND Delta Analysis
-      # - name: Upload ND delta
-      #   if: always()
-      #   uses: actions/upload-artifact@v4
-      #   with:
-      #     name: nd-delta
-      #     path: |
-      #       ${{ env.WORKING_DIR }}/nd-delta.md
-      #       ${{ env.WORKING_DIR }}/delta.raw
-      #     retention-days: 5
-      #     if-no-files-found: warn
-
-      # Upload artifacts when using nac-test analysis
       - name: Upload nac-test reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -865,7 +894,7 @@ jobs:
             nac-test-failures.md
           retention-days: 30
           if-no-files-found: warn
-      
+
       - name: Publish report to Pages
         if: always() && github.ref == 'refs/heads/main'
         continue-on-error: true
