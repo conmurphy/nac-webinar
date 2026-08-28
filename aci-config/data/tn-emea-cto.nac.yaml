@@ -46,7 +46,8 @@ apic:
               scope: tenant
 
       application_profiles:
-        - name: conmurph-nac-security-groups
+        - name: security-groups
+          managed: false
           endpoint_security_groups:
             - name: all-services
               vrf: vrf-external
@@ -62,7 +63,8 @@ apic:
                 providers:
                   - permit-all-to-conmurph-nac
 
-        - name: conmurph-nac-network-segments
+        - name: network-segments
+          managed: false
           endpoint_groups: 
             - name: 198.18.215.0_26 # nac-webinar
               bridge_domain: 198.18.215.0_26 
