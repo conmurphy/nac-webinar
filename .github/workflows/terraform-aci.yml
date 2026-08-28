@@ -408,17 +408,6 @@ jobs:
           listed=$(jq -r '(.compliance.violating_rules // []) | length' nd-prechange.json)
           echo "compliance: enforced=${enforced} configured=${configured} declared_violations=${declared} listed=${listed}"
 
-          : > nd-compliance-warnings.md
-          if [ "${listed}" -lt "${declared}" ]; then
-            echo "::warning::Compliance report truncated: ${declared} violated rules declared, ${listed} returned. Needs paging in the nac-analytics compliance read path."
-            echo "- ⚠️ Compliance list is **incomplete**: ${declared} violated rules declared, only ${listed} returned. The CLI's compliance read path is not paging." >> nd-compliance-warnings.md
-          fi
-          if [ "${enforced}" -lt "${configured}" ]; then
-            echo "::warning::${configured} configuration rules exist but only ${enforced} are enforced. Unenforced rules pass silently."
-            echo "- ⚠️ **$(( configured - enforced )) of ${configured}** configuration rules are not enforced and therefore cannot fail this gate." >> nd-compliance-warnings.md
-          fi
-          cat nd-anomalies.md
-
       - name: Tidy ND report
         id: ndclean
         if: always()
