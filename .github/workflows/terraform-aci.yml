@@ -346,7 +346,6 @@ jobs:
               echo "Baseline snapshot: \`${{ steps.baseline.outputs.snapshot_id || 'latest' }}\`"
               echo ''
               JOB="${{ steps.prechange.outputs.job_id }}"
-              nd_gate_ran: ${{ steps.prechange.outputs.gate_ran }}
               if [ -n "$JOB" ]; then
                 echo "🔗 [Open this pre-change analysis in Nexus Dashboard](${{ vars.ND_HOST }}${{ env.ND_PRECHANGE_UI_PATH }}/${{ vars.ND_FABRIC }}/${JOB})"
               else
