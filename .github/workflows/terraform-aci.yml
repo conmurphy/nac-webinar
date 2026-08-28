@@ -905,17 +905,54 @@ jobs:
           if-no-files-found: warn
 
       - name: Publish report to Pages
+        id: pages
         if: always() && github.ref == 'refs/heads/main'
         continue-on-error: true
         working-directory: .
         run: |
           DEST="reports/run-${{ github.run_number }}"
           mkdir -p "gh-pages/${DEST}"
-          cp -r nac-test-results/robot_results/*.html "gh-pages/${DEST}/" || true
-          cp nac-test-results/combined_summary.html "gh-pages/${DEST}/index.html" || true
+
+          # Stop Jekyll touching anything, and make the branch root serve.
+          touch gh-pages/.nojekyll
+
+          copied=0
+          for f in nac-test-results/robot_results/report.html \
+                   nac-test-results/robot_results/log.html \
+                   nac-test-results/combined_summary.html; do
+            if [ -f "$f" ]; then
+              cp "$f" "gh-pages/${DEST}/"
+              copied=$((copied+1))
+            else
+              echo "missing (skipped): $f"
+            fi
+          done
+
+          if [ "$copied" = "0" ]; then
+            echo "::warning::No nac-test HTML found - nothing to publish for ${DEST}"
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A directory with no index.html is a 404 on Pages. Pick the best
+          # available file as index rather than relying on combined_summary.
+          if [ ! -f "gh-pages/${DEST}/index.html" ]; then
+            if   [ -f "gh-pages/${DEST}/combined_summary.html" ]; then
+              cp "gh-pages/${DEST}/combined_summary.html" "gh-pages/${DEST}/index.html"
+            elif [ -f "gh-pages/${DEST}/report.html" ]; then
+              cp "gh-pages/${DEST}/report.html" "gh-pages/${DEST}/index.html"
+            fi
+          fi
+
+          [ -f "gh-pages/${DEST}/index.html" ] \
+            && echo "published=true"  >> "$GITHUB_OUTPUT" \
+            || echo "published=false" >> "$GITHUB_OUTPUT"
+
+          echo "--- ${DEST} ---"
+          ls -l "gh-pages/${DEST}"
 
       - name: Deploy to Pages
-        if: always() && github.ref == 'refs/heads/main'
+        if: always() && github.ref == 'refs/heads/main' && steps.pages.outputs.published == 'true'
         continue-on-error: true
         uses: peaceiris/actions-gh-pages@v4
         with:
