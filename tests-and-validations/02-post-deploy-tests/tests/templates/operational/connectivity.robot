@@ -48,11 +48,10 @@ ${DNS_PROBE_NAME}         google.com
 ${INTERNAL_HTTPS_HOST}    ${EMPTY}
 
 # ─── fabric SSH ───
-# node_id:mgmt_ip pairs. Node IDs come from the data model; only the reachable
-# management addresses have to be supplied, because the model carries BGP
-# router-IDs (loopbacks) rather than management addresses.
-#   --variable NODE_MGMT_MAP:1101:198.18.192.71,1102:198.18.192.72
-${NODE_MGMT_MAP}          ${EMPTY}
+# Read from the environment. nac-test does not accept --variable directly
+# (Click parses it as an unknown option and exits 2), and %{} avoids putting
+# anything on a command line at all.
+${NODE_MGMT_MAP}          %{NODE_MGMT_MAP=}
 # Read from the environment so the secret never appears in a process command
 # line. Passing it with --variable would expose it in /proc to anything in the
 # same container.
@@ -76,13 +75,13 @@ ${SSH_READ_TIMEOUT}       45s
 # Comma-separated subnet CIDRs extracted from plan.json, e.g.
 #   198.18.215.1/26,198.18.215.65/26
 # Empty means "run every configured subnet" (full sweep).
-${CHANGED_SUBNETS}        ${EMPTY}
+${CHANGED_SUBNETS}        %{CHANGED_SUBNETS=}
 
 # ─── runner -> gateway ICMP ───
 # Default enabled: these subnets are public behind the L3Out, so the path
 # should work and a failure is a genuine finding. Accepts true/false as a
 # string or a boolean - normalised in Suite Setup.
-${GATEWAY_PING_ENABLED}   true
+${GATEWAY_PING_ENABLED}   %{GATEWAY_PING_ENABLED=true}
 
 # ─── populated by Suite Setup ───
 ${ICMP_AVAILABLE}         ${False}

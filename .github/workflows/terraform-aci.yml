@@ -60,9 +60,9 @@ env:
   # HOME can resolve to '/', producing "Could not create directory '/.ssh'".
   HOME: /home/runner
 
-permissions:
-  contents: read
-  pull-requests: write
+# permissions:
+#   contents: read
+#   pull-requests: write
 
 jobs:
   # ══════════════════════════════════════════════════════════
@@ -733,6 +733,11 @@ jobs:
        (github.event_name == 'workflow_dispatch' && inputs.action == 'apply'))
     runs-on: [self-hosted, openshift, aci]
     environment: aci-tenant-emea-cto
+    # gh-pages publishing pushes a commit with GITHUB_TOKEN, which requires
+    # write. Job-level permissions override the workflow-level read default, so
+    # the plan job stays read-only.
+    permissions:
+      contents: write
     defaults:
       run:
         working-directory: ${{ env.WORKING_DIR }}
@@ -824,14 +829,20 @@ jobs:
           ACI_URL:         ${{ secrets.APIC_URL }}
           ACI_USERNAME:    ${{ secrets.APIC_USERNAME }}
           ACI_PASSWORD:    ${{ secrets.APIC_PASSWORD }}
-          SWITCH_USER:     ${{ secrets.APIC_USERNAME }}
-          SWITCH_PASSWORD: ${{ secrets.APIC_PASSWORD }}
+          SWITCH_USER:     ${{ secrets.SWITCH_USER }}
+          SWITCH_PASSWORD: ${{ secrets.SWITCH_PASSWORD }}
+          # Robot reads these with %{VAR=} syntax. nac-test rejects --variable,
+          # and the environment keeps credentials out of any command line.
+          NODE_MGMT_MAP:   ${{ vars.NODE_MGMT_MAP }}
+          CHANGED_SUBNETS: ${{ needs.plan.outputs.changed_subnets }}
           PYTHONWARNINGS:  'ignore:Unverified HTTPS request'
         run: |
-          echo "test scope   : ${{ needs.plan.outputs.changed_subnets || '<full sweep>' }}"
-          echo "node map     : ${{ vars.NODE_MGMT_MAP || '<EMPTY - fabric tests will skip>' }}"
+          echo "test scope   : ${CHANGED_SUBNETS:-<full sweep>}"
+          echo "node map     : ${NODE_MGMT_MAP:-<EMPTY - fabric tests will skip>}"
           [ -n "$SWITCH_USER" ] && echo "SWITCH_USER  : set" \
             || echo "::warning::SWITCH_USER is empty - fabric iping tests will skip"
+          [ -n "$NODE_MGMT_MAP" ] \
+            || echo "::warning::NODE_MGMT_MAP repo variable is not set - every fabric iping test will SKIP"
 
           set +e
           nac-test \
@@ -842,9 +853,7 @@ jobs:
             -o nac-test-results \
             --exclude baseline \
             --processes 2 \
-            --minimal-reports \
-            --variable NODE_MGMT_MAP:${{ vars.NODE_MGMT_MAP }} \
-            --variable CHANGED_SUBNETS:${{ needs.plan.outputs.changed_subnets }}
+            --minimal-reports
           code=$?
           set -e
           echo "exitcode=$code" >> "$GITHUB_OUTPUT"
@@ -881,6 +890,7 @@ jobs:
           ACI_PASSWORD:    ${{ secrets.APIC_PASSWORD }}
           SWITCH_USER:     ${{ secrets.SWITCH_USER }}
           SWITCH_PASSWORD: ${{ secrets.SWITCH_PASSWORD }}
+          NODE_MGMT_MAP:   ${{ vars.NODE_MGMT_MAP }}
           PYTHONWARNINGS:  'ignore:Unverified HTTPS request'
         run: |
           set +e
@@ -892,8 +902,7 @@ jobs:
             -o nac-test-baseline \
             --include baseline \
             --processes 2 \
-            --minimal-reports \
-            --variable NODE_MGMT_MAP:${{ vars.NODE_MGMT_MAP }}
+            --minimal-reports
           code=$?
           set -e
           echo "exitcode=$code" >> "$GITHUB_OUTPUT"
@@ -907,6 +916,7 @@ jobs:
           python3 - > nac-test-failures.md <<'PY'
           import xml.etree.ElementTree as ET, os
           rows = []
+          ran = 0
           for label, path in (
               ("change", "nac-test-results/robot_results/output.xml"),
               ("baseline", "nac-test-baseline/robot_results/output.xml"),
@@ -915,6 +925,7 @@ jobs:
                   continue
               t = ET.parse(path)
               for tc in t.iter('test'):
+                  ran += 1
                   st = tc.find('status')
                   if st.get('status') != 'FAIL':
                       continue
@@ -927,8 +938,11 @@ jobs:
                   name = name.replace('|', '\|')
                   msg = msg.replace('|', '\|')
                   print(f'| {label} | {name} | {msg} |')
+          elif ran == 0:
+              print('_No tests ran - nac-test did not produce output.xml. '
+                    'Check the nac-test step logs._')
           else:
-              print('_All tests passed._')
+              print(f'_All {ran} tests passed._')
           PY
           cat nac-test-failures.md
 
@@ -1053,10 +1067,22 @@ jobs:
             && echo "published=true"  >> "$GITHUB_OUTPUT" \
             || echo "published=false" >> "$GITHUB_OUTPUT"
 
+          # Root landing page listing published runs. Regenerated each time;
+          # keep_files:true means older run dirs persist on the branch.
+          {
+            echo '<!doctype html><meta charset="utf-8">'
+            echo '<title>nac-webinar test reports</title>'
+            echo '<h1>ACI NaC post-deploy test reports</h1><ul>'
+            echo "<li><a href=\"reports/run-${{ github.run_number }}/\">run-${{ github.run_number }}</a> — ${{ github.sha }}</li>"
+            echo '</ul>'
+            echo '<p>Older runs are at <code>reports/run-&lt;N&gt;/</code>.</p>'
+          } > gh-pages/index.html
+
           echo "--- ${DEST} ---"
           ls -l "gh-pages/${DEST}"
 
       - name: Deploy to Pages
+        id: deploy
         if: always() && github.ref == 'refs/heads/main' && steps.pages.outputs.published == 'true'
         continue-on-error: true
         uses: peaceiris/actions-gh-pages@v4
@@ -1064,3 +1090,19 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./gh-pages
           keep_files: true
+
+      - name: Report Pages outcome
+        if: always() && github.ref == 'refs/heads/main'
+        working-directory: .
+        run: |
+          PUB="${{ steps.pages.outputs.published }}"
+          DEP="${{ steps.deploy.outcome }}"
+          URL="https://conmurphy.github.io/nac-webinar/reports/run-${{ github.run_number }}/"
+          echo "published=${PUB} deploy_outcome=${DEP}"
+          if [ "$PUB" != "true" ]; then
+            echo "::warning::No HTML was staged - nac-test produced no report. ${URL} will 404."
+          elif [ "$DEP" != "success" ]; then
+            echo "::error::gh-pages deploy failed (${DEP}). Check that the apply job has 'permissions: contents: write'. ${URL} will 404."
+          else
+            echo "published to ${URL} - allow ~1 min for the Pages build"
+          fi
