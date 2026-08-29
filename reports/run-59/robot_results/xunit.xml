@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="Robot Results" tests="32" errors="0" failures="6" skipped="0" time="110.691" timestamp="2026-08-29T08:29:32.309492">
+<testsuite name="Operational" tests="32" errors="0" failures="6" skipped="0" time="110.164" timestamp="2026-08-29T08:29:32.825000">
+<testsuite name="Connectivity" tests="12" errors="0" failures="6" skipped="0" time="110.161" timestamp="2026-08-29T08:29:32.829000">
+<testcase classname="Robot Results.Operational.Connectivity" name="Fabric Egress From emea-cto 198.18.215.0_26 Gateway 198.18.215.1" time="16.366">
+<failure message="Invalid IF condition: Evaluating expression &quot;'PING 8.8.8.8 (8.8.8.8) from 198.18.215.1: 56 data bytes\n64 bytes from 8.8.8.8: icmp_seq=0 ttl=112 time=19.902 ms\n64 bytes from 8.8.8.8: icmp_seq=1 ttl=112 time=14.758 ms\n64 bytes from 8.8.8.8: icmp_seq=2 ttl=112 time=17.959 ms\n\n--- 8.8.8.8 ping statistics ---\n3 packets transmitted, 3 packets received, 0.00% packet loss\nround-trip min/avg/max = 14.758/17.539/19.902 ms\ncai-emea-site-01-leaf-1101#' == ''&quot; failed: SyntaxError: unterminated string literal (detected at line 1) (&lt;string&gt;, line 1)&#10;&#10;Variables in the original expression &quot;'${trimmed}' == ''&quot; were resolved before the expression was evaluated. Try using &quot;$trimmed == ''&quot; syntax to avoid that. See Evaluating Expressions appendix in Robot Framework User Guide for more details." type="AssertionError"/>
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Fabric Reach DNS From emea-cto 198.18.215.0_26 Gateway 198.18.215.1" time="16.344">
+<failure message="Invalid IF condition: Evaluating expression &quot;'PING 198.18.194.4 (198.18.194.4) from 198.18.215.1: 56 data bytes\n64 bytes from 198.18.194.4: icmp_seq=0 ttl=126 time=0.717 ms\n64 bytes from 198.18.194.4: icmp_seq=1 ttl=126 time=0.627 ms\n64 bytes from 198.18.194.4: icmp_seq=2 ttl=126 time=0.576 ms\n\n--- 198.18.194.4 ping statistics ---\n3 packets transmitted, 3 packets received, 0.00% packet loss\nround-trip min/avg/max = 0.576/0.64/0.717 ms\ncai-emea-site-01-leaf-1101#' == ''&quot; failed: SyntaxError: unterminated string literal (detected at line 1) (&lt;string&gt;, line 1)&#10;&#10;Variables in the original expression &quot;'${trimmed}' == ''&quot; were resolved before the expression was evaluated. Try using &quot;$trimmed == ''&quot; syntax to avoid that. See Evaluating Expressions appendix in Robot Framework User Guide for more details." type="AssertionError"/>
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Runner Ping Gateway 198.18.215.1 In emea-cto BD 198.18.215.0_26" time="2.115">
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Fabric Egress From emea-cto 198.18.215.64_26 Gateway 198.18.215.65" time="16.362">
+<failure message="Invalid IF condition: Evaluating expression &quot;'PING 8.8.8.8 (8.8.8.8) from 198.18.215.65: 56 data bytes\n64 bytes from 8.8.8.8: icmp_seq=0 ttl=112 time=14.824 ms\n64 bytes from 8.8.8.8: icmp_seq=1 ttl=112 time=14.597 ms\n64 bytes from 8.8.8.8: icmp_seq=2 ttl=112 time=14.509 ms\n\n--- 8.8.8.8 ping statistics ---\n3 packets transmitted, 3 packets received, 0.00% packet loss\nround-trip min/avg/max = 14.509/14.643/14.824 ms\ncai-emea-site-01-leaf-1101#' == ''&quot; failed: SyntaxError: unterminated string literal (detected at line 1) (&lt;string&gt;, line 1)&#10;&#10;Variables in the original expression &quot;'${trimmed}' == ''&quot; were resolved before the expression was evaluated. Try using &quot;$trimmed == ''&quot; syntax to avoid that. See Evaluating Expressions appendix in Robot Framework User Guide for more details." type="AssertionError"/>
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Fabric Reach DNS From emea-cto 198.18.215.64_26 Gateway 198.18.215.65" time="21.345">
+<failure message="Invalid IF condition: Evaluating expression &quot;'PING 198.18.194.4 (198.18.194.4) from 198.18.215.65: 56 data bytes\n64 bytes from 198.18.194.4: icmp_seq=0 ttl=126 time=0.729 ms\n64 bytes from 198.18.194.4: icmp_seq=1 ttl=126 time=0.799 ms\n64 bytes from 198.18.194.4: icmp_seq=2 ttl=126 time=0.532 ms\n\n--- 198.18.194.4 ping statistics ---\n3 packets transmitted, 3 packets received, 0.00% packet loss\nround-trip min/avg/max = 0.532/0.686/0.799 ms\ncai-emea-site-01-leaf-1101#' == ''&quot; failed: SyntaxError: unterminated string literal (detected at line 1) (&lt;string&gt;, line 1)&#10;&#10;Variables in the original expression &quot;'${trimmed}' == ''&quot; were resolved before the expression was evaluated. Try using &quot;$trimmed == ''&quot; syntax to avoid that. See Evaluating Expressions appendix in Robot Framework User Guide for more details." type="AssertionError"/>
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Runner Ping Gateway 198.18.215.65 In emea-cto BD 198.18.215.64_26" time="2.118">
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Fabric Egress From emea-cto 198.18.215.128_26 Gateway 198.18.215.129" time="16.342">
+<failure message="Invalid IF condition: Evaluating expression &quot;'PING 8.8.8.8 (8.8.8.8) from 198.18.215.129: 56 data bytes\n64 bytes from 8.8.8.8: icmp_seq=0 ttl=112 time=15.527 ms\n64 bytes from 8.8.8.8: icmp_seq=1 ttl=112 time=19.977 ms\n64 bytes from 8.8.8.8: icmp_seq=2 ttl=112 time=15.33 ms\n\n--- 8.8.8.8 ping statistics ---\n3 packets transmitted, 3 packets received, 0.00% packet loss\nround-trip min/avg/max = 15.33/16.944/19.977 ms\ncai-emea-site-01-leaf-1101#' == ''&quot; failed: SyntaxError: unterminated string literal (detected at line 1) (&lt;string&gt;, line 1)&#10;&#10;Variables in the original expression &quot;'${trimmed}' == ''&quot; were resolved before the expression was evaluated. Try using &quot;$trimmed == ''&quot; syntax to avoid that. See Evaluating Expressions appendix in Robot Framework User Guide for more details." type="AssertionError"/>
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Fabric Reach DNS From emea-cto 198.18.215.128_26 Gateway 198.18.215.129" time="16.348">
+<failure message="Invalid IF condition: Evaluating expression &quot;'PING 198.18.194.4 (198.18.194.4) from 198.18.215.129: 56 data bytes\n64 bytes from 198.18.194.4: icmp_seq=0 ttl=126 time=0.66 ms\n64 bytes from 198.18.194.4: icmp_seq=1 ttl=126 time=0.641 ms\n64 bytes from 198.18.194.4: icmp_seq=2 ttl=126 time=0.501 ms\n\n--- 198.18.194.4 ping statistics ---\n3 packets transmitted, 3 packets received, 0.00% packet loss\nround-trip min/avg/max = 0.501/0.6/0.66 ms\ncai-emea-site-01-leaf-1101#' == ''&quot; failed: SyntaxError: unterminated string literal (detected at line 1) (&lt;string&gt;, line 1)&#10;&#10;Variables in the original expression &quot;'${trimmed}' == ''&quot; were resolved before the expression was evaluated. Try using &quot;$trimmed == ''&quot; syntax to avoid that. See Evaluating Expressions appendix in Robot Framework User Guide for more details." type="AssertionError"/>
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Runner Ping Gateway 198.18.215.129 In emea-cto BD 198.18.215.128_26" time="2.116">
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Verify DHCP Server Is Reachable" time="0.004">
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Verify DNS Servers Answer Queries" time="0.223">
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Verify DNS Servers Agree Or Both Fail" time="0.252">
+</testcase>
+<properties>
+<property name="Documentation" value="Post-change connectivity verification for the ACI fabric.&#10;&#10;Two vantage points, deliberately kept distinct:&#10;&#10;1. FABRIC-SOURCED - iping executed ON a border leaf, sourced&#10;   from the BD anycast gateway. Proves the pervasive SVI is&#10;   deployed, unicast routing is on, the subnet is advertised&#10;   out the L3Out, the contract permits ICMP, and return&#10;   traffic lands. This is the authoritative post-change check.&#10;&#10;2. RUNNER-SOURCED - ping / dig / curl from the CI container.&#10;   Valid on this fabric only because every subnet is&#10;   public:true behind l3out-to-core-01, so the gateways are&#10;   reachable from the cluster pod network. Proves the&#10;   north-south path in the opposite direction.&#10;&#10;Test cases are rendered from the data model. A subnet is&#10;eligible only when its BD has a VRF, the subnet is public, and&#10;border-leaf nodes are resolvable - otherwise no test case is&#10;emitted at all. CHANGED_SUBNETS then narrows execution to the&#10;subnets touched by this change; when it is empty the full&#10;configured set runs as a regression sweep.&#10;&#10;TRANSPORT NOTE: iping is a VSH-hosted wrapper that writes to a&#10;controlling terminal. The non-PTY SSH exec channel discards its&#10;output while still exiting 0 - verified on this fabric, where&#10;exec_command returned exactly '&#10;&#10;&#10;&#10;&#10;'. This suite must&#10;therefore use Login + Write + Read Until Prompt, which requests&#10;a PTY via invoke_shell(). Never use Execute Command here."/>
+</properties>
+</testsuite>
+<testsuite name="Emea-Cto" tests="15" errors="0" failures="0" skipped="0" time="2.091" timestamp="2026-08-29T08:29:32.826000">
+<testsuite name="L3Out" tests="2" errors="0" failures="0" skipped="0" time="0.615" timestamp="2026-08-29T08:29:32.827082">
+<testcase classname="Robot Results.Operational.Emea-Cto.L3Out" name="Verify L3out l3out-to-core-01 BGP Peer 172.16.1.209/29 Node 1101 Interface 1" time="0.060">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.L3Out" name="Verify L3out l3out-to-core-01 BGP Peer 172.16.1.209/29 Node 1102 Interface 1" time="0.037">
+</testcase>
+<properties>
+<property name="Documentation" value="Verify L3out Operational State"/>
+</properties>
+</testsuite>
+<testsuite name="Static Port" tests="13" errors="0" failures="0" skipped="0" time="0.965" timestamp="2026-08-29T08:29:33.952676">
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.0_26 Deployed Path Count" time="0.043">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.0_26 Path vpc-ucs-test-01-6536-A VLAN 1228 Deployed" time="0.042">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.0_26 Path vpc-ucs-test-01-6536-B VLAN 1228 Deployed" time="0.040">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.0_26 Path vpc-ucs-prod-01-6454-A VLAN 1228 Deployed" time="0.044">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.0_26 Path vpc-ucs-prod-01-6454-B VLAN 1228 Deployed" time="0.063">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.64_26 Deployed Path Count" time="0.019">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.64_26 Path vpc-ucs-test-01-6536-A VLAN 1229 Deployed" time="0.041">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.64_26 Path vpc-ucs-test-01-6536-B VLAN 1229 Deployed" time="0.042">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.64_26 Path vpc-ucs-prod-01-6454-A VLAN 1229 Deployed" time="0.042">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.64_26 Path vpc-ucs-prod-01-6454-B VLAN 1229 Deployed" time="0.041">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.128_26 Deployed Path Count" time="0.043">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.128_26 Path vpc-ucs-test-01-6536-A VLAN 1230 Deployed" time="0.043">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.128_26 Path vpc-ucs-test-01-6536-B VLAN 1230 Deployed" time="0.041">
+</testcase>
+<properties>
+<property name="Documentation" value="Verify EPG Static Path Deployment"/>
+</properties>
+</testsuite>
+</testsuite>
+<testsuite name="Interface" tests="1" errors="0" failures="0" skipped="0" time="0.451" timestamp="2026-08-29T08:29:35.386418">
+<testcase classname="Robot Results.Operational.Interface" name="Verify No Configured Interface Is Down Due To Error" time="0.060">
+</testcase>
+<properties>
+<property name="Documentation" value="Verify Physical Interface Operational State"/>
+</properties>
+</testsuite>
+<testsuite name="Vpc" tests="4" errors="0" failures="0" skipped="0" time="0.622" timestamp="2026-08-29T08:29:36.329405">
+<testcase classname="Robot Results.Operational.Vpc" name="Verify vPC Bundle vpc-ucs-test-01-6536-A Is Up On Both Peers" time="0.078">
+</testcase>
+<testcase classname="Robot Results.Operational.Vpc" name="Verify vPC Bundle vpc-ucs-test-01-6536-B Is Up On Both Peers" time="0.049">
+</testcase>
+<testcase classname="Robot Results.Operational.Vpc" name="Verify vPC Bundle vpc-ucs-prod-01-6454-A Is Up On Both Peers" time="0.053">
+</testcase>
+<testcase classname="Robot Results.Operational.Vpc" name="Verify vPC Bundle vpc-ucs-prod-01-6454-B Is Up On Both Peers" time="0.050">
+</testcase>
+<properties>
+<property name="Documentation" value="Verify vPC Domain And Member Interface State"/>
+</properties>
+</testsuite>
+</testsuite>
+<properties>
+<property name="Pabot Info" value="[https://pabot.org/?ref=log|Pabot] result from 5 executions."/>
+<property name="Pabot Version" value="5.2.2"/>
+</properties>
+</testsuite>
