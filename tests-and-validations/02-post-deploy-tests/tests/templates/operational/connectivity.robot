@@ -65,11 +65,15 @@ ${PING_COUNT}             3
 ${FABRIC_EXT_TARGET}      8.8.8.8
 # In-band management VRF. Confirm with 'show vrf' on a leaf before trusting.
 ${MGMT_VRF}               mgmt:inb
-# Verified prompt: "cai-emea-site-01-leaf-1101# ". Matched as a regexp so a
-# hostname change or a different leaf does not break the read.
-${SWITCH_PROMPT}          [\w.\-]+#\s*$
-# iping -c 3 takes ~3s; generous headroom for a busy control plane.
-${SSH_READ_TIMEOUT}       45s
+# PLAIN string, not a regexp. A regexp here is fragile: Robot strips the
+# backslashes out of a variable value, so '[\w.\-]+#\s*$' arrives at SSHLibrary
+# as '[w.-]+#s*$' and never matches. Verified prompt is
+# "cai-emea-site-01-leaf-1101# " and '#' appears nowhere else in the exchange -
+# not in the MOTD, not in the echoed command, not in iping output.
+${SWITCH_PROMPT}          #
+# iping -c 3 takes ~3s. 20s is ample; 45s multiplied by every failure turned a
+# 40-second suite into a 7-minute one on the run where the prompt did not match.
+${SSH_READ_TIMEOUT}       20s
 
 # ─── change scoping ───
 # Comma-separated subnet CIDRs extracted from plan.json, e.g.
@@ -221,23 +225,29 @@ Subnet Is In Scope
 
 Open Switch Session
     [Documentation]    Opens an interactive shell on a leaf. invoke_shell()
-    ...                requests a PTY, which is mandatory for iping.
+    ...                requests a PTY, which is mandatory for iping - the
+    ...                non-PTY exec channel returns '\n\n\n\n\n' on this
+    ...                platform.
+    ...
+    ...                Login consumes the MOTD up to the first prompt, so the
+    ...                buffer is clean before the command is written.
     ...
     ...                Prefers public-key auth when SWITCH_KEYFILE is set. With
-    ...                password auth the credential is passed as a keyword
-    ...                argument, which Robot records unresolved (as
-    ...                ${SWITCH_PASSWORD}) at default log level - but it WOULD be
-    ...                written in clear text at DEBUG level. Never run this suite
-    ...                with --loglevel DEBUG or nac-test --verbose.
+    ...                password auth the credential is a keyword argument, which
+    ...                Robot records unresolved at default log level but WOULD
+    ...                write in clear text at DEBUG. Never run with
+    ...                --loglevel DEBUG or nac-test --verbose - log.html is
+    ...                published to GitHub Pages.
     [Arguments]    ${switch_ip}
     Open Connection    ${switch_ip}
-    ...    prompt=REGEXP:${SWITCH_PROMPT}
+    ...    prompt=${SWITCH_PROMPT}
     ...    term_type=vt100    width=200    height=5000
     ...    timeout=${SSH_READ_TIMEOUT}
     IF    ${USE_KEY_AUTH}
         Login With Public Key    ${SWITCH_USER}    ${SWITCH_KEYFILE}
+        ...    delay=0.5s
     ELSE
-        Login    ${SWITCH_USER}    ${SWITCH_PASSWORD}
+        Login    ${SWITCH_USER}    ${SWITCH_PASSWORD}    delay=0.5s
     END
 
 Fabric Ping
@@ -250,8 +260,8 @@ Fabric Ping
     ...                untrustworthy regardless - callers parse the text.
     ...
     ...                A failed session returns an SSH-ERROR string rather than
-    ...                raising, so the caller can turn it into a specific
-    ...                assertion message instead of an opaque library error.
+    ...                raising, so the caller reports a specific assertion
+    ...                instead of an opaque library error.
     [Arguments]    ${switch_ip}    ${vrf}    ${dest}    ${source}=${EMPTY}
     ${cmd}=    Set Variable    iping -V ${vrf} -c ${PING_COUNT}
     IF    '${source}' != ''
@@ -267,8 +277,8 @@ Fabric Ping
         IF    '${status}' == 'PASS'
             ${raw}=    Set Variable    ${result}
         ELSE
-            Log    Prompt regexp ${SWITCH_PROMPT} did not match - falling back to a buffered read. Detail: ${result}    WARN
-            ${fs}    ${fr}=    Run Keyword And Ignore Error    Read    delay=3s
+            Log    Prompt '${SWITCH_PROMPT}' not seen within ${SSH_READ_TIMEOUT}; falling back to a buffered read. Detail: ${result}    WARN
+            ${fs}    ${fr}=    Run Keyword And Ignore Error    Read    delay=5s
             IF    '${fs}' == 'PASS'
                 ${raw}=    Set Variable    ${fr}
             END
@@ -356,11 +366,17 @@ TCP Port Should Be Open
     [Documentation]    Capability-safe reachability check - no ICMP, so it works
     ...                even where NET_RAW is dropped. Returns connect_ex rc;
     ...                0 means open.
+    ...
+    ...                Robot variables are strings, and socket.settimeout()
+    ...                rejects a str with TypeError - both timeout and port must
+    ...                be converted explicitly.
     [Arguments]    ${host}    ${port}    ${timeout}=${TCP_TIMEOUT}
+    ${t}=       Convert To Number     ${timeout}
+    ${p}=       Convert To Integer    ${port}
     ${sock}=    Evaluate    __import__('socket').socket()    modules=socket
-    ${addr}=    Evaluate    ('${host}', ${port})
+    ${addr}=    Evaluate    ('${host}', ${p})
     TRY
-        Call Method    ${sock}    settimeout    ${timeout}
+        Call Method    ${sock}    settimeout    ${t}
         ${rc}=    Call Method    ${sock}    connect_ex    ${addr}
     FINALLY
         Call Method    ${sock}    close

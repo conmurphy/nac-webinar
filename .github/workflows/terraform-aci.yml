@@ -779,12 +779,19 @@ jobs:
       - name: Verify nac-test fabric test dependencies
         continue-on-error: true
         run: |
-          python3 -c "import SSHLibrary, paramiko; print('SSHLibrary', SSHLibrary.__version__, '/ paramiko', paramiko.__version__)" \
-            || echo "::warning::SSHLibrary/paramiko not importable - fabric iping tests will fail to load. Install robotframework-sshlibrary into the interpreter that runs Robot."
-          command -v dig >/dev/null && dig -v 2>&1 | head -1 \
-            || echo "::warning::dig is missing - resolver tests will skip"
-          command -v ping >/dev/null && echo "ping: present" \
-            || echo "::warning::ping is missing - runner gateway tests will skip"
+          # Probe the interpreter that actually runs Robot, not system python3.
+          NT="$(command -v nac-test || true)"
+          PY="$(head -1 "$NT" 2>/dev/null | sed 's|^#!||' | awk '{print $1}')"
+          echo "nac-test      : ${NT:-<not found>}"
+          echo "its interpreter: ${PY:-<unknown>}"
+          if [ -x "$PY" ]; then
+            "$PY" -c "import SSHLibrary, paramiko; print('SSHLibrary', SSHLibrary.__version__, '/ paramiko', paramiko.__version__)" \
+              || echo "::warning::SSHLibrary/paramiko missing from the Robot interpreter - fabric iping tests will fail to load"
+          else
+            echo "::warning::could not resolve nac-test's interpreter - skipping import check"
+          fi
+          command -v dig  >/dev/null && dig -v 2>&1 | head -1 || echo "::warning::dig is missing - resolver tests will skip"
+          command -v ping >/dev/null && echo "ping: present"   || echo "::warning::ping is missing - runner gateway tests will skip"
 
       - name: Download plan
         uses: actions/download-artifact@v4
@@ -935,8 +942,8 @@ jobs:
               print('| scope | test | reason |')
               print('| --- | --- | --- |')
               for label, name, msg in rows:
-                  name = name.replace('|', '\|')
-                  msg = msg.replace('|', '\|')
+                  name = name.replace('|', '&#124;')
+                  msg = msg.replace('|', '&#124;')
                   print(f'| {label} | {name} | {msg} |')
           elif ran == 0:
               print('_No tests ran - nac-test did not produce output.xml. '
@@ -1030,22 +1037,69 @@ jobs:
         working-directory: .
         run: |
           DEST="reports/run-${{ github.run_number }}"
-          mkdir -p "gh-pages/${DEST}"
+          mkdir -p "gh-pages/${DEST}/robot_results"
+          mkdir -p "gh-pages/${DEST}/baseline/robot_results"
 
           # Stop Jekyll touching anything, and make the branch root serve.
           touch gh-pages/.nojekyll
 
+          echo '--- available nac-test HTML (pabot_results excluded) ---'
+          find nac-test-results nac-test-baseline -name '*.html' \
+            -not -path '*/pabot_results/*' 2>/dev/null | sort || true
+          echo '--------------------------------------------------------'
+
           copied=0
-          for f in nac-test-results/robot_results/report.html \
-                   nac-test-results/robot_results/log.html \
-                   nac-test-results/combined_summary.html; do
-            if [ -f "$f" ]; then
-              cp "$f" "gh-pages/${DEST}/"
-              copied=$((copied+1))
-            else
-              echo "missing (skipped): $f"
-            fi
+
+          # ── change-verification run ──
+          # combined_summary.html links to robot_results/*.html, so that
+          # directory structure MUST be preserved. Flat copies alone leave the
+          # dashboard's internal links 404ing. pabot_results is deliberately
+          # excluded - it is per-process scratch output and can be tens of MB.
+          if [ -f nac-test-results/combined_summary.html ]; then
+            cp nac-test-results/combined_summary.html "gh-pages/${DEST}/"
+            copied=$((copied+1))
+          fi
+
+          for f in nac-test-results/robot_results/*.html; do
+            [ -f "$f" ] || continue
+            cp "$f" "gh-pages/${DEST}/robot_results/"
+            copied=$((copied+1))
           done
+
+          # Flat copies as well, so direct URLs and older summary links still
+          # resolve at the run root.
+          for n in report.html log.html; do
+            [ -f "nac-test-results/robot_results/$n" ] \
+              && cp "nac-test-results/robot_results/$n" "gh-pages/${DEST}/"
+          done
+
+          # xunit.xml is small and useful to external consumers.
+          [ -f nac-test-results/robot_results/xunit.xml ] \
+            && cp nac-test-results/robot_results/xunit.xml "gh-pages/${DEST}/robot_results/"
+
+          # ── informational baseline run ──
+          # Kept in its own subtree so its combined_summary.html links to its own
+          # robot_results and cannot collide with the change-verification files.
+          if [ -f nac-test-baseline/combined_summary.html ]; then
+            cp nac-test-baseline/combined_summary.html "gh-pages/${DEST}/baseline/"
+            copied=$((copied+1))
+          fi
+
+          for f in nac-test-baseline/robot_results/*.html; do
+            [ -f "$f" ] || continue
+            cp "$f" "gh-pages/${DEST}/baseline/robot_results/"
+            copied=$((copied+1))
+          done
+
+          [ -f nac-test-baseline/robot_results/report.html ] \
+            && cp nac-test-baseline/robot_results/report.html "gh-pages/${DEST}/baseline/"
+
+          # Drop the baseline tree entirely if nothing landed in it, so the
+          # published run directory does not advertise an empty folder.
+          if [ -z "$(find "gh-pages/${DEST}/baseline" -type f 2>/dev/null)" ]; then
+            rm -rf "gh-pages/${DEST}/baseline"
+            echo "no baseline HTML produced - baseline/ omitted"
+          fi
 
           if [ "$copied" = "0" ]; then
             echo "::warning::No nac-test HTML found - nothing to publish for ${DEST}"
@@ -1053,13 +1107,24 @@ jobs:
             exit 0
           fi
 
-          # A directory with no index.html is a 404 on Pages. Pick the best
-          # available file as index rather than relying on combined_summary.
+          # A directory with no index.html is a 404 on Pages. Prefer the combined
+          # dashboard, then the Robot report, then the flat copy.
           if [ ! -f "gh-pages/${DEST}/index.html" ]; then
             if   [ -f "gh-pages/${DEST}/combined_summary.html" ]; then
               cp "gh-pages/${DEST}/combined_summary.html" "gh-pages/${DEST}/index.html"
+            elif [ -f "gh-pages/${DEST}/robot_results/report.html" ]; then
+              cp "gh-pages/${DEST}/robot_results/report.html" "gh-pages/${DEST}/index.html"
             elif [ -f "gh-pages/${DEST}/report.html" ]; then
               cp "gh-pages/${DEST}/report.html" "gh-pages/${DEST}/index.html"
+            fi
+          fi
+
+          # Same for the baseline subtree, so .../baseline/ is browsable.
+          if [ -d "gh-pages/${DEST}/baseline" ] && [ ! -f "gh-pages/${DEST}/baseline/index.html" ]; then
+            if   [ -f "gh-pages/${DEST}/baseline/combined_summary.html" ]; then
+              cp "gh-pages/${DEST}/baseline/combined_summary.html" "gh-pages/${DEST}/baseline/index.html"
+            elif [ -f "gh-pages/${DEST}/baseline/report.html" ]; then
+              cp "gh-pages/${DEST}/baseline/report.html" "gh-pages/${DEST}/baseline/index.html"
             fi
           fi
 
@@ -1067,19 +1132,27 @@ jobs:
             && echo "published=true"  >> "$GITHUB_OUTPUT" \
             || echo "published=false" >> "$GITHUB_OUTPUT"
 
-          # Root landing page listing published runs. Regenerated each time;
-          # keep_files:true means older run dirs persist on the branch.
+          # Root landing page. Regenerated each run and therefore only links the
+          # current one - the gh-pages checkout is created fresh here, so older
+          # run numbers are not enumerable. keep_files:true means older run
+          # directories persist on the branch and remain reachable by URL.
+          BASELINE_LINK=''
+          if [ -f "gh-pages/${DEST}/baseline/index.html" ]; then
+            BASELINE_LINK=" (<a href=\"${DEST}/baseline/\">baseline</a>)"
+          fi
           {
             echo '<!doctype html><meta charset="utf-8">'
             echo '<title>nac-webinar test reports</title>'
             echo '<h1>ACI NaC post-deploy test reports</h1><ul>'
-            echo "<li><a href=\"reports/run-${{ github.run_number }}/\">run-${{ github.run_number }}</a> — ${{ github.sha }}</li>"
+            echo "<li><a href=\"${DEST}/\">run-${{ github.run_number }}</a>${BASELINE_LINK} &mdash; ${{ github.sha }}</li>"
             echo '</ul>'
-            echo '<p>Older runs are at <code>reports/run-&lt;N&gt;/</code>.</p>'
+            echo '<p>Older runs remain published at <code>reports/run-&lt;N&gt;/</code>.</p>'
           } > gh-pages/index.html
 
-          echo "--- ${DEST} ---"
-          ls -l "gh-pages/${DEST}"
+          echo "--- published tree for ${DEST} ---"
+          find "gh-pages/${DEST}" -type f | sort
+          echo "--- total size ---"
+          du -sh "gh-pages/${DEST}"
 
       - name: Deploy to Pages
         id: deploy
