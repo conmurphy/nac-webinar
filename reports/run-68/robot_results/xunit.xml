@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="Robot Results" tests="32" errors="0" failures="0" skipped="0" time="103.974" timestamp="2026-08-31T12:40:39.025971">
+<testsuite name="Operational" tests="32" errors="0" failures="0" skipped="0" time="103.634" timestamp="2026-08-31T12:40:39.461000">
+<testsuite name="Connectivity" tests="12" errors="0" failures="0" skipped="0" time="103.634" timestamp="2026-08-31T12:40:39.461000">
+<testcase classname="Robot Results.Operational.Connectivity" name="Fabric Egress From emea-cto 198.18.215.0_26 Gateway 198.18.215.1" time="10.628">
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Fabric Reach DNS From emea-cto 198.18.215.0_26 Gateway 198.18.215.1" time="21.278">
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Runner Ping Gateway 198.18.215.1 In emea-cto BD 198.18.215.0_26" time="2.110">
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Fabric Egress From emea-cto 198.18.215.64_26 Gateway 198.18.215.65" time="10.519">
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Fabric Reach DNS From emea-cto 198.18.215.64_26 Gateway 198.18.215.65" time="21.339">
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Runner Ping Gateway 198.18.215.65 In emea-cto BD 198.18.215.64_26" time="2.110">
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Fabric Egress From emea-cto 198.18.215.128_26 Gateway 198.18.215.129" time="10.651">
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Fabric Reach DNS From emea-cto 198.18.215.128_26 Gateway 198.18.215.129" time="22.222">
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Runner Ping Gateway 198.18.215.129 In emea-cto BD 198.18.215.128_26" time="2.110">
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Verify DHCP Server Is Reachable" time="0.003">
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Verify DNS Servers Answer Queries" time="0.215">
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Verify DNS Servers Agree Or Both Fail" time="0.217">
+</testcase>
+<properties>
+<property name="Documentation" value="Post-change connectivity verification for the ACI fabric.&#10;&#10;Two vantage points, deliberately kept distinct:&#10;&#10;1. FABRIC-SOURCED - iping executed ON a border leaf, sourced&#10;   from the BD anycast gateway. Proves the pervasive SVI is&#10;   deployed, unicast routing is on, the subnet is advertised&#10;   out the L3Out, the contract permits ICMP, and return&#10;   traffic lands. This is the authoritative post-change check.&#10;&#10;2. RUNNER-SOURCED - ping / dig / curl from the CI container.&#10;   Valid on this fabric only because every subnet is&#10;   public:true behind l3out-to-core-01, so the gateways are&#10;   reachable from the cluster pod network. Proves the&#10;   north-south path in the opposite direction.&#10;&#10;Test cases are rendered from the data model. A subnet is&#10;eligible only when its BD has a VRF, the subnet is public, and&#10;border-leaf nodes are resolvable - otherwise no test case is&#10;emitted at all. CHANGED_SUBNETS then narrows execution to the&#10;subnets touched by this change; when it is empty the full&#10;configured set runs as a regression sweep.&#10;&#10;TRANSPORT NOTE: iping is a VSH-hosted wrapper that writes to a&#10;controlling terminal. The non-PTY SSH exec channel discards its&#10;output while still exiting 0 - verified on this fabric, where&#10;exec_command returned exactly five newlines. This suite must&#10;therefore use Login + Write + Read Until Prompt, which requests&#10;a PTY via invoke_shell(). Never use Execute Command here.&#10;&#10;ROBOT ESCAPING NOTE: no regexp in this file contains a&#10;backslash. Robot strips a backslash before any character that&#10;is not a recognised escape, so a cell containing 'd' arrives&#10;as 'd' and the pattern silently never matches. Character&#10;classes ([0-9], [ ], [^:]) are used instead - they are immune&#10;to that transformation and survive copy/paste."/>
+</properties>
+</testsuite>
+<testsuite name="Emea-Cto" tests="15" errors="0" failures="0" skipped="0" time="1.786" timestamp="2026-08-31T12:40:39.462000">
+<testsuite name="L3Out" tests="2" errors="0" failures="0" skipped="0" time="0.484" timestamp="2026-08-31T12:40:39.462588">
+<testcase classname="Robot Results.Operational.Emea-Cto.L3Out" name="Verify L3out l3out-to-core-01 BGP Peer 172.16.1.209/29 Node 1101 Interface 1" time="0.051">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.L3Out" name="Verify L3out l3out-to-core-01 BGP Peer 172.16.1.209/29 Node 1102 Interface 1" time="0.033">
+</testcase>
+<properties>
+<property name="Documentation" value="Verify L3out Operational State"/>
+</properties>
+</testsuite>
+<testsuite name="Static Port" tests="13" errors="0" failures="0" skipped="0" time="0.882" timestamp="2026-08-31T12:40:40.366418">
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.0_26 Deployed Path Count" time="0.036">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.0_26 Path vpc-ucs-test-01-6536-A VLAN 1228 Deployed" time="0.059">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.0_26 Path vpc-ucs-test-01-6536-B VLAN 1228 Deployed" time="0.042">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.0_26 Path vpc-ucs-prod-01-6454-A VLAN 1228 Deployed" time="0.043">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.0_26 Path vpc-ucs-prod-01-6454-B VLAN 1228 Deployed" time="0.041">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.64_26 Deployed Path Count" time="0.025">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.64_26 Path vpc-ucs-test-01-6536-A VLAN 1229 Deployed" time="0.060">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.64_26 Path vpc-ucs-test-01-6536-B VLAN 1229 Deployed" time="0.041">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.64_26 Path vpc-ucs-prod-01-6454-A VLAN 1229 Deployed" time="0.043">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.64_26 Path vpc-ucs-prod-01-6454-B VLAN 1229 Deployed" time="0.057">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.128_26 Deployed Path Count" time="0.014">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.128_26 Path vpc-ucs-test-01-6536-A VLAN 1230 Deployed" time="0.060">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.128_26 Path vpc-ucs-test-01-6536-B VLAN 1230 Deployed" time="0.043">
+</testcase>
+<properties>
+<property name="Documentation" value="Verify EPG Static Path Deployment&#10;&#10;Two assertion levels per path:&#10;  1. The fvRsPathAtt MO exists (config accepted by APIC).&#10;  2. Its relation is not 'missing-target', which would mean the&#10;     vPC or interface policy group named in the path does not&#10;     exist - config present, no connectivity.&#10;&#10;NOTE: state='formed' is NOT asserted. Verified on this fabric&#10;that working vPC static paths report state='unformed' while&#10;vlanCktEp shows operSt=up with a real hwId, because the target&#10;fabricPathEp lives in the topology tree rather than the policy&#10;tree. Asserting 'formed' produces a false failure on every&#10;binding. Hardware programming is the reliable signal.&#10;&#10;CHANGED_PATHS can narrow execution to the bindings touched by&#10;this change, matched on full DN. Not wired into the pipeline:&#10;these are 13 sub-second API calls, so scoping saves nothing and&#10;a full sweep is the stronger statement. Leaving the variable&#10;unset runs everything."/>
+</properties>
+</testsuite>
+</testsuite>
+<testsuite name="Interface" tests="1" errors="0" failures="0" skipped="0" time="0.353" timestamp="2026-08-31T12:40:41.584718">
+<testcase classname="Robot Results.Operational.Interface" name="Verify No Configured Interface Is Down Due To Error" time="0.052">
+</testcase>
+<properties>
+<property name="Documentation" value="Verify Physical Interface Operational State"/>
+</properties>
+</testsuite>
+<testsuite name="Vpc" tests="4" errors="0" failures="0" skipped="0" time="0.505" timestamp="2026-08-31T12:40:42.299183">
+<testcase classname="Robot Results.Operational.Vpc" name="Verify vPC Bundle vpc-ucs-test-01-6536-A Is Up On Both Peers" time="0.062">
+</testcase>
+<testcase classname="Robot Results.Operational.Vpc" name="Verify vPC Bundle vpc-ucs-test-01-6536-B Is Up On Both Peers" time="0.049">
+</testcase>
+<testcase classname="Robot Results.Operational.Vpc" name="Verify vPC Bundle vpc-ucs-prod-01-6454-A Is Up On Both Peers" time="0.042">
+</testcase>
+<testcase classname="Robot Results.Operational.Vpc" name="Verify vPC Bundle vpc-ucs-prod-01-6454-B Is Up On Both Peers" time="0.049">
+</testcase>
+<properties>
+<property name="Documentation" value="Verify vPC Domain And Member Interface State"/>
+</properties>
+</testsuite>
+</testsuite>
+<properties>
+<property name="Pabot Info" value="[https://pabot.org/?ref=log|Pabot] result from 5 executions."/>
+<property name="Pabot Version" value="5.2.2"/>
+</properties>
+</testsuite>
