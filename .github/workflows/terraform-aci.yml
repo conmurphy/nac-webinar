@@ -19,7 +19,7 @@ on:
         type: choice
         options: [plan, apply]
       baseline:
-        description: 'ND baseline: latest is instant, analyze runs a real job (~7 min)'
+        description: 'ND baseline: latest is instant using the latest snapshot, analyze runs a new analysis job (10 - 15 minutes)'
         required: true
         default: 'latest'
         type: choice
@@ -69,7 +69,7 @@ permissions:
 jobs:
   # ══════════════════════════════════════════════════════════
   # JOB 1 — Plan + Nexus Dashboard pre-change analysis
-  # Any branch or PR. No approval gate.
+  # Any branch or PR. No approval required.
   # ══════════════════════════════════════════════════════════
   plan:
     name: Validate & Plan
@@ -545,39 +545,45 @@ jobs:
               echo ''
               echo "🔗 [Nexus Dashboard pre-change analysis hub](${{ vars.ND_HOST }}${{ env.ND_PRECHANGE_UI_PATH }})"
               echo ''
-              if [ "${CRIT:-0}" = "0" ] && [ "${MAJ:-0}" = "0" ]; then
-                echo '✅ **No new critical or major anomalies predicted** for this change.'
-              else
-                echo "⚠️ **This change is predicted to introduce anomalies:** ${CRIT:-0} critical, ${MAJ:-0} major."
-                echo ''
-                echo 'The apply is blocked. Review the detail below.'
-              fi
-              echo ''
-              echo '| severity | new |'
-              echo '| --- | --- |'
-              echo "| critical | ${CRIT:-0} |"
-              echo "| major | ${MAJ:-0} |"
-              echo "| minor | ${MIN:-0} |"
-              echo "| warning | ${WARN:-0} |"
-              echo ''
-              if [ -s nd-violations.md ]; then
-                echo '### Compliance rules violated'
-                echo ''
-                cat nd-violations.md
-                echo ''
-              fi
-              if [ -s nd-compliance-warnings.md ]; then
-                echo '#### Compliance reporting caveats'
-                echo ''
-                cat nd-compliance-warnings.md
-                echo ''
-              fi
+              # if [ "${CRIT:-0}" = "0" ] && [ "${MAJ:-0}" = "0" ]; then
+              #   echo '✅ **No new critical or major anomalies predicted** for this change.'
+              # else
+              #   echo "⚠️ **This change is predicted to introduce anomalies:** ${CRIT:-0} critical, ${MAJ:-0} major."
+              #   echo ''
+              #   echo 'The apply is blocked. Review the detail below.'
+              # fi
+              # echo ''
+              # echo '| severity | new |'
+              # echo '| --- | --- |'
+              # echo "| critical | ${CRIT:-0} |"
+              # echo "| major | ${MAJ:-0} |"
+              # echo "| minor | ${MIN:-0} |"
+              # echo "| warning | ${WARN:-0} |"
+              # echo ''
+              # if [ -s nd-violations.md ]; then
+              #   echo '### Compliance rules violated'
+              #   echo ''
+              #   cat nd-violations.md
+              #   echo ''
+              # fi
+              # if [ -s nd-compliance-warnings.md ]; then
+              #   echo '#### Compliance reporting caveats'
+              #   echo ''
+              #   cat nd-compliance-warnings.md
+              #   echo ''
+              # fi
+              # if [ -s nd-anomalies.md ]; then
+              #   echo '<details><summary>Fabric anomaly context</summary>'
+              #   echo ''
+              #   cat nd-anomalies.md
+              #   echo ''
+              #   echo '</details>'
+              #   echo ''
+              # fi
               if [ -s nd-anomalies.md ]; then
-                echo '<details><summary>Fabric anomaly context (filtered)</summary>'
+                echo '#### Fabric anomaly context'
                 echo ''
                 cat nd-anomalies.md
-                echo ''
-                echo '</details>'
                 echo ''
               fi
               echo '<details><summary>Full Nexus Dashboard report</summary>'
@@ -811,7 +817,7 @@ jobs:
             echo "::warning::could not resolve nac-test's interpreter - skipping import check"
           fi
           command -v dig  >/dev/null && dig -v 2>&1 | head -1 || echo "::warning::dig is missing - resolver tests will skip"
-          command -v ping >/dev/null && echo "ping: present"   || echo "::warning::ping is missing - runner gateway tests will skip"
+          command -v ping >/dev/null && echo "ping: present"   || echo "::warning::ping is missing - client gateway tests will skip"
 
       - name: Download plan
         uses: actions/download-artifact@v4
@@ -845,7 +851,7 @@ jobs:
       # --processes 2 caps the SSH fan-out. ACI leaves limit concurrent sessions
       # per user, and exceeding it produces failures that look like fabric faults.
       #
-      # --exclude fabric-ping is deliberately ABSENT. The runner has L3Out
+      # --exclude fabric-ping is deliberately ABSENT. The client has L3Out
       # reachability to these public BD gateways, so that test is a real
       # bidirectional check and should gate.
       - name: nac-test - change verification
@@ -995,12 +1001,10 @@ jobs:
             echo ''
             echo '## Post-change operational verification (nac-test)'
             echo ''
-            echo "Fabric ICMP scope: \`${SCOPE:-all configured subnets (full sweep)}\`"
-            echo ''
-            echo '> Static path, L3Out, vPC and interface suites always run a full sweep - they are sub-second API calls, so scoping them would trade coverage for nothing.'
+            echo "Fabric ICMP scope: \`${SCOPE:-all configured subnets}\`"
             echo ''
             if [ "${FAILED:-0}" = "0" ] && [ "${TOTAL:-0}" != "0" ]; then
-              echo "✅ **${PASSED:-0} of ${TOTAL} operational tests passed.** Fabric-sourced ICMP from each BD anycast gateway (iping on a border leaf, inside the tenant VRF), runner-sourced reachability to those same gateways over the L3Out, static path bindings and encap, L3Out BGP state, vPC state, interface state, and shared-services DNS."
+              echo "✅ **${PASSED:-0} of ${TOTAL} operational tests passed.** Fabric-sourced ICMP from each BD anycast gateway (iping on a border leaf, inside the tenant VRF), client reachability to those same gateways over the L3Out, static path bindings and encap, L3Out BGP state, vPC state, interface state, and shared-services DNS."
             elif [ "${TOTAL:-0}" = "0" ]; then
               echo "⚠️ **No tests ran** - check the nac-test step logs (template render, missing SSHLibrary, or credential failure)."
             else
@@ -1017,8 +1021,8 @@ jobs:
             echo "| failed | ${FAILED:-0} |"
             echo "| skipped | ${SKIPPED:-0} |"
             echo "| total | ${TOTAL:-0} |"
-            echo ''
-            echo "📊 **[Download the full HTML report](${RUN_URL}#artifacts)** — open \`report.html\` for the interactive Robot Framework dashboard."
+            # echo ''
+            # echo "📊 **[Download the full HTML report](${RUN_URL}#artifacts)** — open \`report.html\` for the interactive Robot Framework dashboard."
             echo ''
             echo "📊 **[Open the interactive test report](https://conmurphy.github.io/nac-webinar/reports/run-${{ github.run_number }}/)**"
             echo ''
