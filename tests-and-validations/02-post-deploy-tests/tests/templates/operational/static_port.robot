@@ -23,6 +23,7 @@ Documentation     Verify EPG Static Path Deployment
 Suite Setup       Login APIC
 Test Tags         apic    day2    operational    tenants    static-ports
 Resource          ../../apic_common.resource
+Library           String
 
 *** Variables ***
 # Comma-separated tDn values from plan.json, e.g.
