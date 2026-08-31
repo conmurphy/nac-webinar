@@ -34,7 +34,7 @@ apic:
             - dhcp_relay_policy: dhcp.emea-se.dcloud.cisco.com
               scope: tenant
         - name: 198.18.215.128_26 # nac-webinar
-          alias: conmurph-nac-webina
+          alias: conmurph-nac-webinar
           vrf: vrf-external
           subnets:
           - ip: 198.18.215.129/26

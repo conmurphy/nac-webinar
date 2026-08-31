@@ -668,16 +668,30 @@ Resolver Should Answer
 
 
 {%-   for subnet in bd.subnets | default([]) %}
-{#-     Render whenever there is a gateway and a reachable candidate leaf.      -#}
-{#-     public / l3out are NOT part of this guard: a subnet that cannot be      -#}
-{#-     reached externally must still produce a visible SKIP, otherwise the      -#}
-{#-     summary reports full coverage for a subnet nothing ever probed.         -#}
+{#-     Render whenever there is a gateway and a candidate leaf. public /      -#}
+{#-     l3outs are NOT part of this guard: a subnet that cannot be reached      -#}
+{#-     externally must still produce a visible SKIP, otherwise the summary     -#}
+{#-     reports full coverage for a subnet nothing ever probed.                -#}
 {%-     if subnet.ip is defined and candidates | length > 0 %}
 {%-       set gw = subnet.ip.split('/')[0] %}
 {%-       set is_public = subnet.public | default(false) %}
 {%-       set bd_l3outs = bd.l3outs | default([]) %}
 {%-       set l3out_list = bd_l3outs | join(', ') or 'none' %}
 {%-       set externally_reachable = is_public and bd_l3outs | length > 0 %}
+{#-       Skip reasons are built HERE, never with an if/endif inside a test     -#}
+{#-       body. nac-test renders with trim_blocks=True, so a block tag inside   -#}
+{#-       a body swallows the newline separating the next Robot line and the    -#}
+{#-       two get joined - which silently turned '${in_scope}=' into a [Tags]   -#}
+{#-       value and then into a Skip argument. One unconditional line with a    -#}
+{#-       Jinja-rendered True/False condition is immune to that.                -#}
+{%-       set fabric_skip_msg = subnet.ip ~ ' is not externally reachable by design (public=' ~ is_public ~ ', l3outs=' ~ l3out_list ~ ') so there is no advertised return path; set public: true and associate an l3out to enable this check' %}
+{%-       if not is_public %}
+{%-         set runner_skip_msg = subnet.ip ~ ' is not public:true, so the gateway is not advertised out of the fabric and the runner has no path to it' %}
+{%-       elif bd_l3outs | length == 0 %}
+{%-         set runner_skip_msg = 'BD ' ~ bd.name ~ ' has no l3outs, so nothing advertises ' ~ subnet.ip ~ ' externally and the runner cannot reach ' ~ gw ~ ' even though the subnet is public' %}
+{%-       else %}
+{%-         set runner_skip_msg = 'runner path is available' %}
+{%-       endif %}
 
 Fabric Egress From {{ tenant.name }} {{ bd.name }} Gateway {{ gw }}
     [Documentation]    iping on a border leaf, sourced from the BD anycast
@@ -694,13 +708,7 @@ Fabric Egress From {{ tenant.name }} {{ bd.name }} Gateway {{ gw }}
     ...                Data model at render time: public={{ is_public }},
     ...                l3outs={{ l3out_list }}.
     [Tags]    fabric-icmp    d2d    subnet-egress
-{%- if not externally_reachable %}
-    # Rendered as a permanent SKIP: with public={{ is_public }} and
-    # l3outs={{ l3out_list }} the subnet is not advertised out of the fabric, so
-    # there is no return path and this ping cannot succeed. Declared before the
-    # scope check because it is a property of the data model, not of this run.
-    Skip    {{ subnet.ip }} is not externally reachable by design (public={{ is_public }}, l3outs={{ l3out_list }}) - no advertised return path, so fabric-sourced egress cannot succeed. Set public: true and associate an l3out to enable this check.
-{%- endif %}
+    Skip If    {{ not externally_reachable }}    {{ fabric_skip_msg }}
     ${in_scope}=    Subnet Is In Scope    {{ subnet.ip }}
     Skip If    not ${in_scope}
     ...    {{ subnet.ip }} is not part of this change (CHANGED_SUBNETS=${CHANGED_SUBNETS})
@@ -725,9 +733,7 @@ Fabric Reach DNS From {{ tenant.name }} {{ bd.name }} Gateway {{ gw }}
     ...                Data model at render time: public={{ is_public }},
     ...                l3outs={{ l3out_list }}.
     [Tags]    fabric-icmp    d2d    shared-services
-{%- if not externally_reachable %}
-    Skip    {{ subnet.ip }} is not externally reachable by design (public={{ is_public }}, l3outs={{ l3out_list }}) - the resolvers sit outside this VRF and there is no advertised return path to {{ gw }}.
-{%- endif %}
+    Skip If    {{ not externally_reachable }}    {{ fabric_skip_msg }}
     ${in_scope}=    Subnet Is In Scope    {{ subnet.ip }}
     Skip If    not ${in_scope}
     ...    {{ subnet.ip }} is not part of this change (CHANGED_SUBNETS=${CHANGED_SUBNETS})
@@ -760,11 +766,7 @@ Runner Ping Gateway {{ gw }} In {{ tenant.name }} BD {{ bd.name }}
     ...                Data model at render time: public={{ is_public }},
     ...                l3outs={{ l3out_list }}.
     [Tags]    fabric-ping    l3out-north-south    icmp
-{%- if not is_public %}
-    Skip    {{ subnet.ip }} is not public:true - the gateway is not advertised out of the fabric, so the runner has no path to it.
-{%- elif bd_l3outs | length == 0 %}
-    Skip    BD {{ bd.name }} has no l3outs - nothing advertises {{ subnet.ip }} externally, so the runner cannot reach {{ gw }} even though the subnet is marked public.
-{%- endif %}
+    Skip If    {{ not externally_reachable }}    {{ runner_skip_msg }}
     ${in_scope}=    Subnet Is In Scope    {{ subnet.ip }}
     Skip If    not ${in_scope}
     ...    {{ subnet.ip }} is not part of this change (CHANGED_SUBNETS=${CHANGED_SUBNETS})
