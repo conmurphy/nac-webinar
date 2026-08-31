@@ -1,0 +1,10 @@
+# Verify against https://docs.zizmor.sh/configuration/ - the policy key
+# names have moved between zizmor releases.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        # GitHub-maintained; a major-version tag is acceptable.
+        actions/*: ref-pin
+        # Everything third-party must be a commit SHA.
+        "*": hash-pin

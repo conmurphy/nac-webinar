@@ -75,14 +75,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Nothing here pushes via the checkout credentials - the gh-pages
+          # deploy uses its own github_token input. Self-hosted runners keep
+          # the workspace, so don't leave a token in .git/config.
+          persist-credentials: false
       - name: actionlint
         run: |
           bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
           ./actionlint -shellcheck=shellcheck
       - name: zizmor
+        env:
+          # Enables online audits (stale action versions, ref existence).
+          # Without this zizmor warns and runs in offline mode.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           pipx install zizmor
-          zizmor .github/workflows/
+          zizmor --min-severity=high .github/workflows/
   # ══════════════════════════════════════════════════════════
   # JOB 1 — Plan + Nexus Dashboard pre-change analysis
   # Any branch or PR. No approval required.
@@ -122,6 +131,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Nothing here pushes via the checkout credentials - the gh-pages
+          # deploy uses its own github_token input. Self-hosted runners keep
+          # the workspace, so don't leave a token in .git/config.
+          persist-credentials: false
 
       - name: Prepare cache dirs
         run: |
@@ -316,8 +330,13 @@ jobs:
       - name: Pin ND baseline snapshot
         id: baseline
         if: steps.plan.outputs.exitcode == '2'
+        env:
+          # 'analyze' is the dispatch-time default.
+          # On push the input is unset, and 'latest' keeps the pipeline fast -
+          # a fresh analysis adds 10-15 min
+          BASELINE_STRATEGY: ${{ github.event.inputs.baseline || 'latest' }}
         run: |
-          strategy="${{ github.event.inputs.baseline || 'analyze' }}"
+          strategy="${BASELINE_STRATEGY:-latest}"
           echo "baseline strategy: ${strategy}"
 
           set +e
@@ -349,8 +368,10 @@ jobs:
       - name: ND pre-change analysis
         id: prechange
         if: steps.plan.outputs.exitcode == '2'
+        env:
+          BASELINE_SNAP: ${{ steps.baseline.outputs.snapshot_id }}
         run: |
-          BASELINE="${{ steps.baseline.outputs.snapshot_id }}"
+          BASELINE="${BASELINE_SNAP:-}"
           [ -n "$BASELINE" ] || BASELINE="latest"
           echo "analysing plan-nd.json against baseline: ${BASELINE}"
 
@@ -408,7 +429,6 @@ jobs:
             echo "gate_ran=true"
           } >> "$GITHUB_OUTPUT"
           echo "job_id: ${job_id:-<none>}"
-          echo "gate_ran=true" >> "$GITHUB_OUTPUT"
 
           case "$code" in
             0) echo "ND: no new anomalies at or above ${ND_FAIL_ON}" ;;
@@ -430,8 +450,10 @@ jobs:
         id: ndcontext
         if: always() && steps.prechange.outputs.job_id != ''
         continue-on-error: true
+        env:
+          WANT_JOB_ID: ${{ steps.prechange.outputs.job_id }}
         run: |
-          WANT_JOB="${{ steps.prechange.outputs.job_id }}"
+          WANT_JOB="${WANT_JOB_ID}"
 
           set +e
           nac-analytics nd prechange \
@@ -556,9 +578,11 @@ jobs:
       - name: ND JUnit report
         if: always() && steps.prechange.outputs.job_id != ''
         continue-on-error: true
+        env:
+          ND_JOB_ID: ${{ steps.prechange.outputs.job_id }}
         run: |
           nac-analytics nd prechange \
-            --job-id "${{ steps.prechange.outputs.job_id }}" \
+            --job-id "${ND_JOB_ID}" \
             --fail-on none \
             --output junit \
             --report-file prechange-report.xml
@@ -790,17 +814,31 @@ jobs:
       ND_PASSWORD: ${{ secrets.ND_PASSWORD }}
     steps:
       - name: Approval context
+        env:
+          PLAN_SUMMARY: ${{ needs.plan.outputs.summary }}
+          ND_SNAPSHOT:  ${{ needs.plan.outputs.nd_snapshot }}
+          ND_EXITCODE:  ${{ needs.plan.outputs.nd_exitcode }}
+          ND_CRITICAL:  ${{ needs.plan.outputs.nd_critical }}
+          ND_MAJOR:     ${{ needs.plan.outputs.nd_major }}
+          SCOPE:        ${{ needs.plan.outputs.changed_subnets }}
+          COMMIT_SHA:   ${{ github.sha }}
+          TRIGGERED_BY: ${{ github.actor }}
         run: |
-          echo "Approved plan   : ${{ needs.plan.outputs.summary }}"
-          echo "ND baseline     : ${{ needs.plan.outputs.nd_snapshot }}"
-          echo "ND prechange    : exit ${{ needs.plan.outputs.nd_exitcode }}"
-          echo "ND anomalies    : ${{ needs.plan.outputs.nd_critical }} critical, ${{ needs.plan.outputs.nd_major }} major"
-          echo "Fabric ICMP scope: ${{ needs.plan.outputs.changed_subnets || 'full sweep' }}"
-          echo "Commit          : ${{ github.sha }}"
-          echo "Triggered by    : ${{ github.actor }}"
+          echo "Approved plan    : ${PLAN_SUMMARY:-unknown}"
+          echo "ND baseline      : ${ND_SNAPSHOT:-<none>}"
+          echo "ND prechange     : exit ${ND_EXITCODE:-<n/a>}"
+          echo "ND anomalies     : ${ND_CRITICAL:-0} critical, ${ND_MAJOR:-0} major"
+          echo "Fabric ICMP scope: ${SCOPE:-full sweep}"
+          echo "Commit           : ${COMMIT_SHA}"
+          echo "Triggered by     : ${TRIGGERED_BY}"
 
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Nothing here pushes via the checkout credentials - the gh-pages
+          # deploy uses its own github_token input. Self-hosted runners keep
+          # the workspace, so don't leave a token in .git/config.
+          persist-credentials: false
 
       - name: Prepare cache dirs
         run: mkdir -p "$TF_PLUGIN_CACHE_DIR" "$TF_DATA_DIR"
@@ -1144,7 +1182,7 @@ jobs:
         id: deploy
         if: always() && github.ref == 'refs/heads/main' && steps.pages.outputs.published == 'true'
         continue-on-error: true
-        uses: peaceiris/actions-gh-pages@v4
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 #v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./gh-pages
@@ -1153,15 +1191,17 @@ jobs:
       - name: Report Pages outcome
         if: always() && github.ref == 'refs/heads/main'
         working-directory: .
+        env:
+          PAGES_STAGED: ${{ steps.pages.outputs.published }}
+          PAGES_DEPLOY: ${{ steps.deploy.outcome }}
+          RUN_NUMBER:   ${{ github.run_number }}
         run: |
-          PUB="${{ steps.pages.outputs.published }}"
-          DEP="${{ steps.deploy.outcome }}"
-          URL="https://conmurphy.github.io/nac-webinar/reports/run-${{ github.run_number }}/"
-          echo "published=${PUB} deploy_outcome=${DEP}"
-          if [ "$PUB" != "true" ]; then
+          URL="https://conmurphy.github.io/nac-webinar/reports/run-${RUN_NUMBER}/"
+          echo "published=${PAGES_STAGED:-n/a} deploy_outcome=${PAGES_DEPLOY:-n/a}"
+          if [ "${PAGES_STAGED:-}" != "true" ]; then
             echo "::warning::No HTML was staged - nac-test produced no report. ${URL} will 404."
-          elif [ "$DEP" != "success" ]; then
-            echo "::error::gh-pages deploy failed (${DEP}). Check that the apply job has 'permissions: contents: write'. ${URL} will 404."
+          elif [ "${PAGES_DEPLOY:-}" != "success" ]; then
+            echo "::error::gh-pages deploy failed (${PAGES_DEPLOY:-n/a}). Check that the apply job has 'permissions: contents: write'. ${URL} will 404."
           else
             echo "published to ${URL} - allow ~1 min for the Pages build"
           fi
