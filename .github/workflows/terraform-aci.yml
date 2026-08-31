@@ -60,9 +60,11 @@ env:
   # HOME can resolve to '/', producing "Could not create directory '/.ssh'".
   HOME: /home/runner
 
-# permissions:
-#   contents: read
-#   pull-requests: write
+# Default for the whole workflow. Each job narrows or widens as needed:
+#   plan  - adds pull-requests: write for the PR comment
+#   apply - adds contents: write so gh-pages can be pushed
+permissions:
+  contents: read
 
 jobs:
   # ══════════════════════════════════════════════════════════
@@ -73,6 +75,11 @@ jobs:
     name: Validate & Plan
     runs-on: [self-hosted, openshift, aci]
     environment: aci-tenant-emea-cto-plan
+    # pull-requests: write is required by the "Comment on PR" step. contents
+    # stays read - only the apply job pushes to gh-pages.
+    permissions:
+      contents: read
+      pull-requests: write
     defaults:
       run:
         working-directory: ${{ env.WORKING_DIR }}
@@ -191,11 +198,14 @@ jobs:
           head -40 plan-summary.md
 
       # ─────────── Change scoping for post-deploy tests ───────────
-      # The YAML data model is declarative and holds no notion of "new" - a BD
-      # added minutes ago is byte-identical to one added months ago. plan.json is
-      # the only place in this pipeline that knows what actually changed, so the
-      # subnet list is extracted here and handed to nac-test at runtime via
+      # The YAML data model is declarative and has no notion of "new". plan.json
+      # is the only place in this pipeline that knows what changed, so the subnet
+      # list is extracted here and handed to nac-test at runtime via
       # CHANGED_SUBNETS. An empty list means the suite runs a full sweep.
+      #
+      # Only SUBNETS are scoped. Static path tests are deliberately NOT scoped:
+      # they are 13 sub-second API calls, so a full sweep costs nothing and
+      # reports stronger coverage than "2 verified, 11 skipped".
       - name: Extract changed subnets for post-deploy tests
         id: changed
         if: always()
@@ -207,23 +217,36 @@ jobs:
             exit 0
           fi
 
-          # fvSubnet objects being created or updated. The DN carries both the BD
-          # name and the subnet CIDR, so one pass yields both lists. 'dn' can be
-          # unknown on creates, so fall back to content.ip.
-          jq -r '
+          # fvSubnet objects being created or updated.
+          #
+          # NO REGEX and no backslash escapes. jq string literals accept only
+          # JSON escapes, so a pattern containing "\[" aborts the program - and
+          # with stderr suppressed that failure is invisible, silently yielding
+          # an empty list and a permanent full sweep. split()/ltrimstr()/
+          # rtrimstr() achieve the same parse using characters that cannot be
+          # mangled by copy/paste.
+          #
+          # Example dn:
+          #   uni/tn-emea-cto/BD-198.18.215.0_26/subnet-[198.18.215.1/26]
+          if ! jq -r '
             .resource_changes[]
             | select((.change.actions // []) | any(. == "create" or . == "update"))
             | (.change.after // {}) as $a
             | select(($a.class_name // "") == "fvSubnet")
-            | if (($a.dn // "") | test("/BD-[^/]+/subnet-\[")) then
-                ($a.dn | capture("/BD-(?<bd>[^/]+)/subnet-\[(?<ip>[^\]]+)\]")
-                        | "\(.bd)\t\(.ip)")
+            | ($a.dn // "") as $dn
+            | if ($dn | contains("/BD-")) and ($dn | contains("/subnet-")) then
+                ( ($dn | split("/BD-") | .[1] | split("/") | .[0]) as $bd
+                | ($dn | split("/subnet-") | .[1] | ltrimstr("[") | rtrimstr("]")) as $ip
+                | "\($bd)\t\($ip)" )
               elif (($a.content.ip // "") != "") then
                 "unknown\t\($a.content.ip)"
               else
                 empty
               end
-          ' plan.json 2>/dev/null | sort -u > changed-subnets.tsv || true
+          ' plan.json > changed-subnets.tsv; then
+            echo "::warning::fvSubnet extraction failed - post-deploy tests will run a full sweep"
+            : > changed-subnets.tsv
+          fi
 
           SUBNETS="$(cut -f2 changed-subnets.tsv | paste -sd, - || true)"
           BDS="$(cut -f1 changed-subnets.tsv | sort -u | paste -sd, - || true)"
@@ -280,7 +303,6 @@ jobs:
           rc=$?
           set -e
 
-          # FIXED: was grepping prechange.err, which does not exist in this step.
           echo "--- CLI diagnostics (stderr) ---"
           grep -v -e "TLS certificate verification is disabled" \
                   -e "more 'online' snapshot(s) exist" \
@@ -372,7 +394,6 @@ jobs:
 
       # ─────────── JSON fetch + filtered anomaly table ───────────
       # Re-reads the SAME completed job via --job-id. Nothing is re-analysed.
-      # If --output json needs --report-file on your build, change the redirect.
       - name: ND anomaly context table
         id: ndcontext
         if: always() && steps.prechange.outputs.job_id != ''
@@ -422,11 +443,11 @@ jobs:
           # Signal filter.
           #
           # NO TIMESTAMP CUTOFF. Compliance violations carry the epoch of rule
-          # import (2026-08-24), not of submission, so a time filter would drop
-          # the very anomalies that block the gate. Filtering on anomalySource
-          # is also unsafe: compliance and traffic noise both report
-          # "telemetry". We filter on cleared / type / acknowledged only, and
-          # label the result as context rather than delta.
+          # import, not of submission, so a time filter would drop the very
+          # anomalies that block the gate. Filtering on anomalySource is also
+          # unsafe: compliance and traffic noise both report "telemetry". We
+          # filter on cleared / type / acknowledged only, and label the result
+          # as context rather than delta.
           #
           # No backslash escapes in this program on purpose - they do not
           # survive copy/paste reliably. The markdown pipe escape arrives via
@@ -581,7 +602,7 @@ jobs:
             echo ''
             cat plan-summary.md 2>/dev/null || echo '_No summary._'
             echo ''
-            echo "**Post-deploy test scope:** \`${SCOPE:-all configured subnets (full sweep)}\`"
+            echo "**Fabric ICMP test scope:** \`${SCOPE:-all configured subnets (full sweep)}\`"
             echo ''
             echo '<details><summary>Raw terraform plan output</summary>'
             echo ''
@@ -702,7 +723,7 @@ jobs:
               '',
               '### 2. Terraform plan',
               '',
-              '**Post-deploy test scope:** `' + scope + '`',
+              '**Fabric ICMP test scope:** `' + scope + '`',
               '',
               '<details><summary>Show plan</summary>',
               '',
@@ -718,7 +739,6 @@ jobs:
               repo: context.repo.repo,
               body: body.join('\n')
             });
-  
   # ══════════════════════════════════════════════════════════
   # JOB 2 — Apply + post-change verification
   # main only, blocks on required reviewers.
@@ -734,8 +754,8 @@ jobs:
     runs-on: [self-hosted, openshift, aci]
     environment: aci-tenant-emea-cto
     # gh-pages publishing pushes a commit with GITHUB_TOKEN, which requires
-    # write. Job-level permissions override the workflow-level read default, so
-    # the plan job stays read-only.
+    # write. Job-level permissions override the workflow default, so the plan
+    # job stays read-only for contents.
     permissions:
       contents: write
     defaults:
@@ -751,13 +771,13 @@ jobs:
     steps:
       - name: Approval context
         run: |
-          echo "Approved plan : ${{ needs.plan.outputs.summary }}"
-          echo "ND baseline   : ${{ needs.plan.outputs.nd_snapshot }}"
-          echo "ND prechange  : exit ${{ needs.plan.outputs.nd_exitcode }}"
-          echo "ND anomalies  : ${{ needs.plan.outputs.nd_critical }} critical, ${{ needs.plan.outputs.nd_major }} major"
-          echo "Test scope    : ${{ needs.plan.outputs.changed_subnets || 'full sweep' }}"
-          echo "Commit        : ${{ github.sha }}"
-          echo "Triggered by  : ${{ github.actor }}"
+          echo "Approved plan   : ${{ needs.plan.outputs.summary }}"
+          echo "ND baseline     : ${{ needs.plan.outputs.nd_snapshot }}"
+          echo "ND prechange    : exit ${{ needs.plan.outputs.nd_exitcode }}"
+          echo "ND anomalies    : ${{ needs.plan.outputs.nd_critical }} critical, ${{ needs.plan.outputs.nd_major }} major"
+          echo "Fabric ICMP scope: ${{ needs.plan.outputs.changed_subnets || 'full sweep' }}"
+          echo "Commit          : ${{ github.sha }}"
+          echo "Triggered by    : ${{ github.actor }}"
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -775,14 +795,14 @@ jobs:
           [ -n "$ND_PASSWORD" ] && echo "ND_PASSWORD: set" || echo "::warning::ND_PASSWORD is EMPTY - add it to the aci-tenant-emea-cto environment"
 
       # The connectivity suite needs SSHLibrary (which pulls paramiko) and dig.
-      # Fail loudly here rather than letting every fabric test skip silently.
+      # Probe the interpreter that actually runs Robot, not system python3 - they
+      # differ, and checking the wrong one produces a misleading warning.
       - name: Verify nac-test fabric test dependencies
         continue-on-error: true
         run: |
-          # Probe the interpreter that actually runs Robot, not system python3.
           NT="$(command -v nac-test || true)"
           PY="$(head -1 "$NT" 2>/dev/null | sed 's|^#!||' | awk '{print $1}')"
-          echo "nac-test      : ${NT:-<not found>}"
+          echo "nac-test       : ${NT:-<not found>}"
           echo "its interpreter: ${PY:-<unknown>}"
           if [ -x "$PY" ]; then
             "$PY" -c "import SSHLibrary, paramiko; print('SSHLibrary', SSHLibrary.__version__, '/ paramiko', paramiko.__version__)" \
@@ -817,15 +837,15 @@ jobs:
           ACI_INSECURE: 'true'
 
       # ═══════════════ Post-change operational verification ═══════════════
-      # SWITCH_USER / SWITCH_PASSWORD are passed as ENVIRONMENT variables, not
-      # via --variable. Robot reads them with %{SWITCH_USER=} syntax. Passing a
-      # password with --variable would place it in the process command line,
-      # readable via /proc by anything in the same container.
+      # SWITCH_USER / SWITCH_PASSWORD / NODE_MGMT_MAP / CHANGED_SUBNETS are
+      # passed as ENVIRONMENT variables, not via --variable: nac-test rejects
+      # --variable ("No such option", exit 2), and the environment keeps the
+      # password out of any command line readable via /proc.
       #
       # --processes 2 caps the SSH fan-out. ACI leaves limit concurrent sessions
       # per user, and exceeding it produces failures that look like fabric faults.
       #
-      # NOTE: --exclude fabric-ping is deliberately ABSENT. The runner has L3Out
+      # --exclude fabric-ping is deliberately ABSENT. The runner has L3Out
       # reachability to these public BD gateways, so that test is a real
       # bidirectional check and should gate.
       - name: nac-test - change verification
@@ -838,15 +858,13 @@ jobs:
           ACI_PASSWORD:    ${{ secrets.APIC_PASSWORD }}
           SWITCH_USER:     ${{ secrets.SWITCH_USER }}
           SWITCH_PASSWORD: ${{ secrets.SWITCH_PASSWORD }}
-          # Robot reads these with %{VAR=} syntax. nac-test rejects --variable,
-          # and the environment keeps credentials out of any command line.
           NODE_MGMT_MAP:   ${{ vars.NODE_MGMT_MAP }}
           CHANGED_SUBNETS: ${{ needs.plan.outputs.changed_subnets }}
           PYTHONWARNINGS:  'ignore:Unverified HTTPS request'
         run: |
-          echo "test scope   : ${CHANGED_SUBNETS:-<full sweep>}"
-          echo "node map     : ${NODE_MGMT_MAP:-<EMPTY - fabric tests will skip>}"
-          [ -n "$SWITCH_USER" ] && echo "SWITCH_USER  : set" \
+          echo "fabric ICMP scope: ${CHANGED_SUBNETS:-<full sweep>}"
+          echo "node map         : ${NODE_MGMT_MAP:-<EMPTY - fabric tests will skip>}"
+          [ -n "$SWITCH_USER" ] && echo "SWITCH_USER      : set" \
             || echo "::warning::SWITCH_USER is empty - fabric iping tests will skip"
           [ -n "$NODE_MGMT_MAP" ] \
             || echo "::warning::NODE_MGMT_MAP repo variable is not set - every fabric iping test will SKIP"
@@ -977,10 +995,12 @@ jobs:
             echo ''
             echo '## Post-change operational verification (nac-test)'
             echo ''
-            echo "Scope: \`${SCOPE:-all configured subnets (full sweep)}\`"
+            echo "Fabric ICMP scope: \`${SCOPE:-all configured subnets (full sweep)}\`"
+            echo ''
+            echo '> Static path, L3Out, vPC and interface suites always run a full sweep - they are sub-second API calls, so scoping them would trade coverage for nothing.'
             echo ''
             if [ "${FAILED:-0}" = "0" ] && [ "${TOTAL:-0}" != "0" ]; then
-              echo "✅ **${PASSED:-0} of ${TOTAL} operational tests passed.** Fabric-sourced ICMP from each BD anycast gateway (iping on a border leaf, inside the tenant VRF), runner-sourced reachability to those same gateways over the L3Out, shared-services DNS resolution and outbound HTTPS."
+              echo "✅ **${PASSED:-0} of ${TOTAL} operational tests passed.** Fabric-sourced ICMP from each BD anycast gateway (iping on a border leaf, inside the tenant VRF), runner-sourced reachability to those same gateways over the L3Out, static path bindings and encap, L3Out BGP state, vPC state, interface state, and shared-services DNS."
             elif [ "${TOTAL:-0}" = "0" ]; then
               echo "⚠️ **No tests ran** - check the nac-test step logs (template render, missing SSHLibrary, or credential failure)."
             else
@@ -1010,7 +1030,7 @@ jobs:
               echo '</details>'
             fi
             echo ''
-            echo '> Fabric baseline tests (management-VRF reachability, external HTTPS, name resolution) run separately and are informational - they reflect pre-existing fabric and upstream state, not this change.'
+            echo '> Fabric baseline tests (hardware, management-VRF reachability, external HTTPS, name resolution) run separately and are informational - they reflect pre-existing fabric and upstream state, not this change.'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload nac-test reports

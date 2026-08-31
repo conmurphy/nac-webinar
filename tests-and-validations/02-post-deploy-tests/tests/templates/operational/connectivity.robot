@@ -25,9 +25,16 @@ Documentation     Post-change connectivity verification for the ACI fabric.
 ...               TRANSPORT NOTE: iping is a VSH-hosted wrapper that writes to a
 ...               controlling terminal. The non-PTY SSH exec channel discards its
 ...               output while still exiting 0 - verified on this fabric, where
-...               exec_command returned exactly '\n\n\n\n\n'. This suite must
+...               exec_command returned exactly five newlines. This suite must
 ...               therefore use Login + Write + Read Until Prompt, which requests
 ...               a PTY via invoke_shell(). Never use Execute Command here.
+...
+...               ROBOT ESCAPING NOTE: no regexp in this file contains a
+...               backslash. Robot strips a backslash before any character that
+...               is not a recognised escape, so a cell containing '\d' arrives
+...               as 'd' and the pattern silently never matches. Character
+...               classes ([0-9], [ ], [^:]) are used instead - they are immune
+...               to that transformation and survive copy/paste.
 Library           Process
 Library           Collections
 Library           String
@@ -52,27 +59,27 @@ ${INTERNAL_HTTPS_HOST}    ${EMPTY}
 # (Click parses it as an unknown option and exits 2), and %{} avoids putting
 # anything on a command line at all.
 ${NODE_MGMT_MAP}          %{NODE_MGMT_MAP=}
-# Read from the environment so the secret never appears in a process command
-# line. Passing it with --variable would expose it in /proc to anything in the
-# same container.
+# Credentials via environment so they never appear in a process command line -
+# --variable would expose them in /proc to anything in the same container.
 ${SWITCH_USER}            %{SWITCH_USER=}
 ${SWITCH_PASSWORD}        %{SWITCH_PASSWORD=}
-# Optional private key. When set, key auth is used and SWITCH_PASSWORD is
-# ignored - strongly preferred, see the notes on log.html.
+# Optional private key. When set, key auth is used and SWITCH_PASSWORD ignored.
 ${SWITCH_KEYFILE}         %{SWITCH_KEYFILE=}
 ${PING_COUNT}             3
 # An IP, not a name - the switches are not relied on for DNS resolution.
 ${FABRIC_EXT_TARGET}      8.8.8.8
 # In-band management VRF. Confirm with 'show vrf' on a leaf before trusting.
 ${MGMT_VRF}               mgmt:inb
-# PLAIN string, not a regexp. A regexp here is fragile: Robot strips the
-# backslashes out of a variable value, so '[\w.\-]+#\s*$' arrives at SSHLibrary
-# as '[w.-]+#s*$' and never matches. Verified prompt is
-# "cai-emea-site-01-leaf-1101# " and '#' appears nowhere else in the exchange -
-# not in the MOTD, not in the echoed command, not in iping output.
-${SWITCH_PROMPT}          #
-# iping -c 3 takes ~3s. 20s is ample; 45s multiplied by every failure turned a
-# 40-second suite into a 7-minute one on the run where the prompt did not match.
+# Regexp with NO backslashes and with '#' inside a character class. Two Robot
+# parsing traps are avoided:
+#   1. Backslashes in a Variables-table value are stripped, so '[\w.\-]+#\s*$'
+#      reached SSHLibrary as '[w.-]+#s*$' and never matched.
+#   2. A bare '#' at the start of a cell is a COMMENT, so '#' alone produced an
+#      empty variable ("Prompt is not set").
+# '[#]' is literal; ' *$' tolerates the trailing space.
+# Verified prompt: "cai-emea-site-01-leaf-1101# ".
+${SWITCH_PROMPT}          REGEXP:[#] *$
+# iping -c 3 takes ~3s. 20s is ample.
 ${SSH_READ_TIMEOUT}       20s
 
 # ─── change scoping ───
@@ -83,8 +90,7 @@ ${CHANGED_SUBNETS}        %{CHANGED_SUBNETS=}
 
 # ─── runner -> gateway ICMP ───
 # Default enabled: these subnets are public behind the L3Out, so the path
-# should work and a failure is a genuine finding. Accepts true/false as a
-# string or a boolean - normalised in Suite Setup.
+# should work and a failure is a genuine finding.
 ${GATEWAY_PING_ENABLED}   %{GATEWAY_PING_ENABLED=true}
 
 # ─── populated by Suite Setup ───
@@ -104,11 +110,13 @@ Probe Runner Capabilities
     Probe Dig Capability
     Parse Node Management Map
     ${n_nodes}=    Get Length    ${NODE_IPS}
+    # $VAR form, not '${VAR}'. Beyond avoiding syntax errors, this keeps the
+    # password out of the expression SOURCE, which Robot echoes on failure.
     ${have_cred}=    Evaluate
-    ...    bool('''${SWITCH_USER}'''.strip()) and (bool('''${SWITCH_PASSWORD}''') or bool('''${SWITCH_KEYFILE}'''.strip()))
-    ${use_key}=    Evaluate    bool('''${SWITCH_KEYFILE}'''.strip())
+    ...    bool($SWITCH_USER.strip()) and (bool($SWITCH_PASSWORD) or bool($SWITCH_KEYFILE.strip()))
+    ${use_key}=    Evaluate    bool($SWITCH_KEYFILE.strip())
     Set Suite Variable    ${USE_KEY_AUTH}    ${use_key}
-    ${have_ssh}=    Evaluate    ${n_nodes} > 0 and ${have_cred}
+    ${have_ssh}=    Evaluate    $n_nodes > 0 and $have_cred
     Set Suite Variable    ${SSH_CONFIGURED}    ${have_ssh}
     IF    ${SSH_CONFIGURED}
         ${mode}=    Set Variable If    ${USE_KEY_AUTH}    public key    password
@@ -118,11 +126,11 @@ Probe Runner Capabilities
     END
 
 Normalise Boolean Flags
-    [Documentation]    A --variable override arrives as a STRING, so the literal
-    ...                "False" would be truthy in 'not ${FLAG}'. Coerce anything
-    ...                falsey-looking to a real boolean.
+    [Documentation]    An environment or --variable override arrives as a STRING,
+    ...                so the literal "False" would be truthy in 'not ${FLAG}'.
+    ...                Coerce anything falsey-looking to a real boolean.
     ${gp}=    Evaluate
-    ...    str('''${GATEWAY_PING_ENABLED}''').strip().lower() not in ('false', '0', 'no', 'off', '')
+    ...    str($GATEWAY_PING_ENABLED).strip().lower() not in ('false', '0', 'no', 'off', '')
     Set Suite Variable    ${GATEWAY_PING_ENABLED}    ${gp}
 
 Probe ICMP Capability
@@ -134,7 +142,7 @@ Probe ICMP Capability
     ${status}    ${result}=    Run Keyword And Ignore Error
     ...    Run Process    ping    -c    1    -W    1    127.0.0.1
     ...    stdout=PIPE    stderr=PIPE    timeout=10s    on_timeout=terminate
-    IF    '${status}' != 'PASS'
+    IF    $status != 'PASS'
         Set Suite Variable    ${ICMP_AVAILABLE}    ${False}
         Set Suite Variable    ${ICMP_REASON}
         ...    ping cannot be executed in this container (NET_RAW dropped): ${result}
@@ -154,7 +162,7 @@ Probe Dig Capability
     ...                into a false failure, so detect it and skip instead.
     ${status}    ${result}=    Run Keyword And Ignore Error
     ...    Run Process    dig    -v    stdout=PIPE    stderr=PIPE    timeout=10s
-    ${have_dig}=    Evaluate    '${status}' == 'PASS'
+    ${have_dig}=    Evaluate    $status == 'PASS'
     Set Suite Variable    ${DIG_AVAILABLE}    ${have_dig}
     IF    not ${DIG_AVAILABLE}
         Log    dig is not available - resolver-specific tests will skip    WARN
@@ -165,11 +173,11 @@ Parse Node Management Map
     ...                keyed by node ID as a string.
     &{map}=    Create Dictionary
     ${raw}=    Strip String    ${NODE_MGMT_MAP}
-    IF    '${raw}' != ''
+    IF    $raw != ''
         @{pairs}=    Split String    ${raw}    ,
         FOR    ${pair}    IN    @{pairs}
             ${clean}=    Strip String    ${pair}
-            IF    '${clean}' == ''
+            IF    $clean == ''
                 CONTINUE
             END
             @{parts}=    Split String    ${clean}    :
@@ -189,8 +197,12 @@ Resolve Node IP
     [Documentation]    Maps a data-model node ID to a reachable management IP.
     ...                Returns empty string when unmapped, so callers skip with
     ...                a clear reason rather than failing against a bad target.
+    ...
+    ...                str($node_id) rather than '${node_id}' - the dict is keyed
+    ...                by string, and interpolation into the expression source is
+    ...                avoided on principle.
     [Arguments]    ${node_id}
-    ${ip}=    Evaluate    $NODE_IPS.get('${node_id}', '')
+    ${ip}=    Evaluate    $NODE_IPS.get(str($node_id), '')
     RETURN    ${ip}
 
 Select Fabric Node
@@ -200,7 +212,7 @@ Select Fabric Node
     [Arguments]    @{candidates}
     FOR    ${nid}    IN    @{candidates}
         ${ip}=    Resolve Node IP    ${nid}
-        IF    '${ip}' != ''
+        IF    $ip != ''
             ${pair}=    Create List    ${nid}    ${ip}
             RETURN    ${pair}
         END
@@ -215,37 +227,33 @@ Subnet Is In Scope
     ...                works.
     [Arguments]    ${subnet_cidr}
     ${raw}=    Strip String    ${CHANGED_SUBNETS}
-    IF    '${raw}' == ''
+    IF    $raw == ''
         RETURN    ${True}
     END
-    ${host}=    Evaluate    '''${subnet_cidr}'''.split('/')[0]
+    ${host}=    Evaluate    $subnet_cidr.split('/')[0]
     ${hit}=    Evaluate
-    ...    any(t.strip() == '''${subnet_cidr}''' or t.strip().split('/')[0] == '''${host}''' for t in '''${raw}'''.split(',') if t.strip())
+    ...    any(t.strip() == $subnet_cidr or t.strip().split('/')[0] == $host for t in $raw.split(',') if t.strip())
     RETURN    ${hit}
 
 Open Switch Session
     [Documentation]    Opens an interactive shell on a leaf. invoke_shell()
     ...                requests a PTY, which is mandatory for iping - the
-    ...                non-PTY exec channel returns '\n\n\n\n\n' on this
+    ...                non-PTY exec channel returns only newlines on this
     ...                platform.
     ...
     ...                Login consumes the MOTD up to the first prompt, so the
     ...                buffer is clean before the command is written.
     ...
-    ...                Prefers public-key auth when SWITCH_KEYFILE is set. With
-    ...                password auth the credential is a keyword argument, which
-    ...                Robot records unresolved at default log level but WOULD
-    ...                write in clear text at DEBUG. Never run with
-    ...                --loglevel DEBUG or nac-test --verbose - log.html is
-    ...                published to GitHub Pages.
+    ...                Never run with --loglevel DEBUG or nac-test --verbose -
+    ...                SSHLibrary logs keyword arguments at DEBUG, and log.html
+    ...                is published to GitHub Pages.
     [Arguments]    ${switch_ip}
     Open Connection    ${switch_ip}
     ...    prompt=${SWITCH_PROMPT}
     ...    term_type=vt100    width=200    height=5000
     ...    timeout=${SSH_READ_TIMEOUT}
     IF    ${USE_KEY_AUTH}
-        Login With Public Key    ${SWITCH_USER}    ${SWITCH_KEYFILE}
-        ...    delay=0.5s
+        Login With Public Key    ${SWITCH_USER}    ${SWITCH_KEYFILE}    delay=0.5s
     ELSE
         Login    ${SWITCH_USER}    ${SWITCH_PASSWORD}    delay=0.5s
     END
@@ -255,7 +263,7 @@ Fabric Ping
     ...
     ...                Uses Write + Read Until Prompt, NOT Execute Command.
     ...                Verified on this fabric: the non-PTY exec channel returns
-    ...                '\n\n\n\n\n' and exits 0, discarding everything. Exit
+    ...                only newlines and exits 0, discarding everything. Exit
     ...                codes are unavailable in shell mode and would be
     ...                untrustworthy regardless - callers parse the text.
     ...
@@ -264,7 +272,7 @@ Fabric Ping
     ...                instead of an opaque library error.
     [Arguments]    ${switch_ip}    ${vrf}    ${dest}    ${source}=${EMPTY}
     ${cmd}=    Set Variable    iping -V ${vrf} -c ${PING_COUNT}
-    IF    '${source}' != ''
+    IF    $source != ''
         ${cmd}=    Set Variable    ${cmd} -S ${source}
     END
     ${cmd}=    Set Variable    ${cmd} ${dest}
@@ -274,12 +282,12 @@ Fabric Ping
         Write    ${cmd}
         ${status}    ${result}=    Run Keyword And Ignore Error
         ...    Read Until Prompt    strip_prompt=${True}
-        IF    '${status}' == 'PASS'
+        IF    $status == 'PASS'
             ${raw}=    Set Variable    ${result}
         ELSE
-            Log    Prompt '${SWITCH_PROMPT}' not seen within ${SSH_READ_TIMEOUT}; falling back to a buffered read. Detail: ${result}    WARN
+            Log    Prompt ${SWITCH_PROMPT} not seen within ${SSH_READ_TIMEOUT}; falling back to a buffered read. Detail: ${result}    WARN
             ${fs}    ${fr}=    Run Keyword And Ignore Error    Read    delay=5s
-            IF    '${fs}' == 'PASS'
+            IF    $fs == 'PASS'
                 ${raw}=    Set Variable    ${fr}
             END
         END
@@ -290,7 +298,8 @@ Fabric Ping
         Run Keyword And Ignore Error    Close Connection
     END
     # A PTY emits CRLF, and layered TTYs can double the CR. Normalise so the
-    # statistics regexp sees plain newlines.
+    # statistics patterns see plain newlines. \r and \n ARE recognised Robot
+    # escapes, so they survive the parser intact.
     ${out}=    Replace String    ${raw}    \r\n    \n
     ${out}=    Replace String    ${out}    \r    ${EMPTY}
     Log    ${switch_ip}: ${cmd}\n${out}
@@ -302,31 +311,38 @@ Count Ping Replies
     ...                Primary pattern is the statistics line, confirmed on this
     ...                fabric as:
     ...                  "3 packets transmitted, 3 packets received, 0.00% packet loss"
-    ...                Two fallbacks cover alternative wordings and a truncated
-    ...                run. Returns -1 when nothing parseable was produced.
+    ...                Two fallbacks cover an alternative wording and a
+    ...                truncated run. Returns -1 when nothing parseable was
+    ...                produced.
     ...
-    ...                In shell mode the captured text also contains the echoed
-    ...                command, so every pattern is anchored to a form that
-    ...                cannot appear in "iping -V ... -c 3 -S ... 8.8.8.8".
+    ...                NO BACKSLASHES in these patterns. Robot strips a
+    ...                backslash before any unrecognised escape, so '[0-9]+'
+    ...                is used instead of the digit class and '[ ]+' instead of
+    ...                the whitespace class. This was a live defect: the earlier
+    ...                single-backslash form arrived as '(d+)s+packetss+received'
+    ...                and matched nothing, so every fabric test failed with
+    ...                "no parseable iping output" while iping had in fact
+    ...                returned 3/3 replies.
     [Arguments]    ${out}
     ${trimmed}=    Strip String    ${out}
-    IF    '${trimmed}' == ''
+    IF    $trimmed == ''
         RETURN    ${-1}
     END
-    @{a}=    Get Regexp Matches    ${out}    (\d+)\s+packets\s+received    1
+    @{a}=    Get Regexp Matches    ${out}    ([0-9]+) +packets +received    1
     ${na}=    Get Length    ${a}
     IF    ${na} > 0
         ${v}=    Convert To Integer    ${a}[0]
         RETURN    ${v}
     END
-    @{b}=    Get Regexp Matches    ${out}    (\d+)\s+received    1
+    @{b}=    Get Regexp Matches    ${out}    ([0-9]+) +received    1
     ${nb}=    Get Length    ${b}
     IF    ${nb} > 0
         ${v}=    Convert To Integer    ${b}[0]
         RETURN    ${v}
     END
-    # icmp_seq= only ever appears on a genuine reply line.
-    @{c}=    Get Regexp Matches    ${out}    bytes\s+from\s+\S+:\s+icmp_seq=
+    # icmp_seq= only ever appears on a genuine reply line, never in the echoed
+    # command or the MOTD.
+    @{c}=    Get Regexp Matches    ${out}    bytes from [^:]+: icmp_seq=
     ${nc}=    Get Length    ${c}
     IF    ${nc} > 0
         RETURN    ${nc}
@@ -336,16 +352,19 @@ Count Ping Replies
 Fabric Ping Should Succeed
     [Documentation]    Asserts at least one ICMP reply by parsing output rather
     ...                than trusting an exit code. Distinguishes three outcomes:
-    ...                the command was rejected, the harness captured nothing,
-    ...                or the ping genuinely lost every packet. Only the last is
-    ...                a fabric finding.
+    ...                the command was rejected, the harness captured nothing, or
+    ...                the ping genuinely lost every packet. Only the last is a
+    ...                fabric finding.
     [Arguments]    ${switch_ip}    ${vrf}    ${dest}    ${source}=${EMPTY}    ${label}=${EMPTY}
     ${out}=    Fabric Ping    ${switch_ip}    ${vrf}    ${dest}    ${source}
     ${lower}=    Convert To Lower Case    ${out}
     FOR    ${bad}    IN    ssh-error    authentication    permission denied
-    ...    invalid    unknown vrf    no such vrf    cannot find    bad source
+    ...    unknown vrf    no such vrf    cannot find    bad source
     ...    % invalid    syntax error    no route to host
-        IF    '${bad}' in '''${lower}'''
+        # $bad / $lower, not '${bad}' in '''${lower}''' - the latter injects the
+        # full multi-line output into the expression source and raises
+        # SyntaxError: unterminated string literal.
+        IF    $bad in $lower
             Run Keyword And Continue On Failure    Fail
             ...    ${label}: iping did not run on ${switch_ip} ("${bad}") - check that VRF ${vrf} exists, that source ${source} is deployed on this leaf, and that the SSH credential is valid. Output: ${out}
             RETURN
@@ -354,7 +373,7 @@ Fabric Ping Should Succeed
     ${received}=    Count Ping Replies    ${out}
     IF    ${received} < 0
         Run Keyword And Continue On Failure    Fail
-        ...    ${label}: no parseable iping output from ${switch_ip}. The prompt regexp may not match this leaf, or the session closed early. Output: ${out}
+        ...    ${label}: no parseable iping output from ${switch_ip}. The prompt may not have matched, or the session closed early. Output: ${out}
     ELSE IF    ${received} == 0
         Run Keyword And Continue On Failure    Fail
         ...    ${label}: total loss from node ${switch_ip} in VRF ${vrf} to ${dest} (source=${source})
@@ -374,7 +393,7 @@ TCP Port Should Be Open
     ${t}=       Convert To Number     ${timeout}
     ${p}=       Convert To Integer    ${port}
     ${sock}=    Evaluate    __import__('socket').socket()    modules=socket
-    ${addr}=    Evaluate    ('${host}', ${p})
+    ${addr}=    Evaluate    ($host, $p)
     TRY
         Call Method    ${sock}    settimeout    ${t}
         ${rc}=    Call Method    ${sock}    connect_ex    ${addr}
@@ -387,7 +406,8 @@ Resolver Should Answer
     [Documentation]    Queries one resolver directly and returns the first answer,
     ...                or empty string. The '=' in dig's +opt=value MUST be
     ...                escaped - Robot otherwise reads '+time=3' as a named
-    ...                argument called '+time'.
+    ...                argument called '+time'. Here the backslash IS wanted:
+    ...                Robot consumes it and passes a literal '='.
     [Arguments]    ${server}    ${name}
     ${result}=    Run Process    dig    @${server}    ${name}    A    +short
     ...    +time\=${DIG_TIMEOUT}    +tries\=1
@@ -496,7 +516,7 @@ Fabric Egress From {{ tenant.name }} {{ bd.name }} Gateway {{ gw }}
     ...    NODE_MGMT_MAP / SWITCH_USER / credential not configured - no fabric SSH target
     @{cands}=    Create List    {{ candidates | join('    ') }}
     ${node}=    Select Fabric Node    @{cands}
-    Skip If    '${node}[1]' == ''
+    Skip If    $node[1] == ''
     ...    None of the candidate nodes {{ candidates | join(', ') }} has an entry in NODE_MGMT_MAP
     Fabric Ping Should Succeed    ${node}[1]
     ...    {{ tenant.name }}:{{ bd.vrf }}
@@ -517,7 +537,7 @@ Fabric Reach DNS From {{ tenant.name }} {{ bd.name }} Gateway {{ gw }}
     ...    NODE_MGMT_MAP / SWITCH_USER / credential not configured - no fabric SSH target
     @{cands}=    Create List    {{ candidates | join('    ') }}
     ${node}=    Select Fabric Node    @{cands}
-    Skip If    '${node}[1]' == ''
+    Skip If    $node[1] == ''
     ...    None of the candidate nodes {{ candidates | join(', ') }} has an entry in NODE_MGMT_MAP
     FOR    ${srv}    IN    @{DNS_SERVERS}
         Fabric Ping Should Succeed    ${node}[1]
@@ -602,7 +622,7 @@ Verify DNS Servers Answer Queries
     ${silent}=    Create List
     FOR    ${srv}    IN    @{DNS_SERVERS}
         ${ans}=    Resolver Should Answer    ${srv}    ${DNS_PROBE_NAME}
-        IF    '${ans}' == ''
+        IF    $ans == ''
             Append To List    ${silent}    ${srv}
         END
     END
@@ -623,7 +643,7 @@ Verify DNS Servers Agree Or Both Fail
     ${silent}=     Create List
     FOR    ${srv}    IN    @{DNS_SERVERS}
         ${ans}=    Resolver Should Answer    ${srv}    ${DNS_PROBE_NAME}
-        IF    '${ans}' == ''
+        IF    $ans == ''
             Append To List    ${silent}    ${srv}
         ELSE
             Append To List    ${answers}    ${ans}
@@ -672,7 +692,7 @@ Verify Outbound HTTPS To Internal Endpoint
     ...                rather than whether google.com happens to be reachable
     ...                from a CI container.
     [Tags]    baseline
-    Skip If    '${INTERNAL_HTTPS_HOST}' == ''
+    Skip If    $INTERNAL_HTTPS_HOST == ''
     ...    INTERNAL_HTTPS_HOST is not set - no internal HTTPS target configured
     ${result}=    Run Process    curl    -f    -s    -S    -k
     ...    -o    /dev/null
@@ -690,9 +710,9 @@ Verify External Name Resolution Via System Resolver
     [Tags]    baseline
     FOR    ${host}    IN    @{EXTERNAL_HOSTS}
         ${status}    ${addr}=    Run Keyword And Ignore Error
-        ...    Evaluate    __import__('socket').gethostbyname('${host}')    modules=socket
+        ...    Evaluate    __import__('socket').gethostbyname($host)    modules=socket
         Log    ${host} -> ${status} ${addr}
-        IF    '${status}' != 'PASS'
+        IF    $status != 'PASS'
             Run Keyword And Continue On Failure    Fail
             ...    Could not resolve ${host} via the system resolver: ${addr}
         END
