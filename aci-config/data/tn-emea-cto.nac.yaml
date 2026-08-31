@@ -36,11 +36,11 @@ apic:
         - name: 198.18.215.128_26 # nac-webinar
           alias: conmurph-nac-webinar
           vrf: vrf-external
-          subnets:
-          - ip: 198.18.215.129/26
-            public: true
-          l3outs:
-            - l3out-to-core-01
+          # subnets:
+          # - ip: 198.18.215.129/26
+          #   public: true
+          # l3outs:
+          #   - l3out-to-core-01
           dhcp_labels:
             - dhcp_relay_policy: dhcp.emea-se.dcloud.cisco.com
               scope: tenant

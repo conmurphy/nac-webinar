@@ -525,10 +525,6 @@ jobs:
             | if $total == 0 then
                 "_No anomaly detail returned by this endpoint._"
               else
-                "Fabric-wide anomaly state, filtered for signal. **This is context, not change impact** - the authoritative new-anomaly counts are in the severity table above.",
-                "",
-                "Suppressed \($cleared) cleared, \($traffic) traffic-analytics, \($acked) acknowledged, out of \($total) records.",
-                "",
                 ( if ($sig | length) == 0 then
                     "_No active, unacknowledged, non-telemetry anomalies._"
                   else
@@ -1310,7 +1306,7 @@ jobs:
             # green change-verification verdict.
             if [ -s "${BASELINE_FAILURES_FILE}" ]; then
               echo ''
-              echo '### Fabric baseline failures (informational - not caused by this change)'
+              echo '### Fabric baseline failures'
               echo ''
               cat "${BASELINE_FAILURES_FILE}"
               echo ''
