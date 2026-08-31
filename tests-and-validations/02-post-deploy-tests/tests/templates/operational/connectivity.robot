@@ -666,9 +666,18 @@ Resolver Should Answer
 {%-   if candidates | length == 0 %}{% set candidates = deploy_nodes %}{% endif %}
 {%-   if candidates | length == 0 %}{% set candidates = border_nodes %}{% endif %}
 
+
 {%-   for subnet in bd.subnets | default([]) %}
-{%-     if subnet.ip is defined and subnet.public | default(false) and candidates | length > 0 %}
+{#-     Render whenever there is a gateway and a reachable candidate leaf.      -#}
+{#-     public / l3out are NOT part of this guard: a subnet that cannot be      -#}
+{#-     reached externally must still produce a visible SKIP, otherwise the      -#}
+{#-     summary reports full coverage for a subnet nothing ever probed.         -#}
+{%-     if subnet.ip is defined and candidates | length > 0 %}
 {%-       set gw = subnet.ip.split('/')[0] %}
+{%-       set is_public = subnet.public | default(false) %}
+{%-       set bd_l3outs = bd.l3outs | default([]) %}
+{%-       set l3out_list = bd_l3outs | join(', ') or 'none' %}
+{%-       set externally_reachable = is_public and bd_l3outs | length > 0 %}
 
 Fabric Egress From {{ tenant.name }} {{ bd.name }} Gateway {{ gw }}
     [Documentation]    iping on a border leaf, sourced from the BD anycast
@@ -677,13 +686,21 @@ Fabric Egress From {{ tenant.name }} {{ bd.name }} Gateway {{ gw }}
     ...
     ...                A pass proves the pervasive SVI is deployed, unicast
     ...                routing is on, {{ subnet.ip }} is advertised out
-    ...                {{ bd.l3outs | default([]) | join(', ') }}, the contract
-    ...                permits ICMP, and return traffic lands.
+    ...                {{ l3out_list }}, the contract permits ICMP, and return
+    ...                traffic lands.
     ...
-    ...                Candidate leaves {{ candidates | join(', ') }} - the
-    ...                intersection of L3Out border nodes and leaves where this
-    ...                BD is deployed via static ports.
+    ...                Candidate leaves {{ candidates | join(', ') }}.
+    ...
+    ...                Data model at render time: public={{ is_public }},
+    ...                l3outs={{ l3out_list }}.
     [Tags]    fabric-icmp    d2d    subnet-egress
+{%- if not externally_reachable %}
+    # Rendered as a permanent SKIP: with public={{ is_public }} and
+    # l3outs={{ l3out_list }} the subnet is not advertised out of the fabric, so
+    # there is no return path and this ping cannot succeed. Declared before the
+    # scope check because it is a property of the data model, not of this run.
+    Skip    {{ subnet.ip }} is not externally reachable by design (public={{ is_public }}, l3outs={{ l3out_list }}) - no advertised return path, so fabric-sourced egress cannot succeed. Set public: true and associate an l3out to enable this check.
+{%- endif %}
     ${in_scope}=    Subnet Is In Scope    {{ subnet.ip }}
     Skip If    not ${in_scope}
     ...    {{ subnet.ip }} is not part of this change (CHANGED_SUBNETS=${CHANGED_SUBNETS})
@@ -705,10 +722,12 @@ Fabric Reach DNS From {{ tenant.name }} {{ bd.name }} Gateway {{ gw }}
     ...                the check that most often catches a subnet added without
     ...                the matching contract or route leak.
     ...
-    ...                The loop below is the main beneficiary of session pooling:
-    ...                it previously opened one SSH session per resolver, and now
-    ...                reuses a single session for all of them.
+    ...                Data model at render time: public={{ is_public }},
+    ...                l3outs={{ l3out_list }}.
     [Tags]    fabric-icmp    d2d    shared-services
+{%- if not externally_reachable %}
+    Skip    {{ subnet.ip }} is not externally reachable by design (public={{ is_public }}, l3outs={{ l3out_list }}) - the resolvers sit outside this VRF and there is no advertised return path to {{ gw }}.
+{%- endif %}
     ${in_scope}=    Subnet Is In Scope    {{ subnet.ip }}
     Skip If    not ${in_scope}
     ...    {{ subnet.ip }} is not part of this change (CHANGED_SUBNETS=${CHANGED_SUBNETS})
@@ -729,16 +748,23 @@ Fabric Reach DNS From {{ tenant.name }} {{ bd.name }} Gateway {{ gw }}
 Runner Ping Gateway {{ gw }} In {{ tenant.name }} BD {{ bd.name }}
     [Documentation]    ICMP from the CI container to the BD anycast gateway.
     ...
-    ...                Valid because {{ subnet.ip }} is public:true behind
-    ...                {{ bd.l3outs | default([]) | join(', ') }}, so the gateway
-    ...                is reachable from the cluster. This is the north-south
-    ...                counterpart to the fabric-sourced test above: together
-    ...                they prove both directions of the L3Out path.
+    ...                Valid only when the subnet is public:true behind an
+    ...                L3Out, so the gateway is reachable from the cluster. This
+    ...                is the north-south counterpart to the fabric-sourced test
+    ...                above: together they prove both directions of the path.
     ...
     ...                A failure here while the fabric-sourced test passes points
     ...                at external route advertisement or the contract on the
     ...                external EPG, not at the BD itself.
+    ...
+    ...                Data model at render time: public={{ is_public }},
+    ...                l3outs={{ l3out_list }}.
     [Tags]    fabric-ping    l3out-north-south    icmp
+{%- if not is_public %}
+    Skip    {{ subnet.ip }} is not public:true - the gateway is not advertised out of the fabric, so the runner has no path to it.
+{%- elif bd_l3outs | length == 0 %}
+    Skip    BD {{ bd.name }} has no l3outs - nothing advertises {{ subnet.ip }} externally, so the runner cannot reach {{ gw }} even though the subnet is marked public.
+{%- endif %}
     ${in_scope}=    Subnet Is In Scope    {{ subnet.ip }}
     Skip If    not ${in_scope}
     ...    {{ subnet.ip }} is not part of this change (CHANGED_SUBNETS=${CHANGED_SUBNETS})
@@ -755,9 +781,6 @@ Runner Ping Gateway {{ gw }} In {{ tenant.name }} BD {{ bd.name }}
 
 {%-     endif %}
 {%-   endfor %}
-{%- endif %}
-{%- endfor %}
-{%- endfor %}
 
 # ─── management-VRF reachability per node (baseline, not change-scoped) ───
 Fabric Nodes Reach DNS In Management VRF
