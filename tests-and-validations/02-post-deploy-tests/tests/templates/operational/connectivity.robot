@@ -29,18 +29,37 @@ Documentation     Post-change connectivity verification for the ACI fabric.
 ...               therefore use Login + Write + Read Until Prompt, which requests
 ...               a PTY via invoke_shell(). Never use Execute Command here.
 ...
+...               SESSION POOLING NOTE: sessions are opened once per node and
+...               reused for every iping against that node, because ACI leaves
+...               cap concurrent sessions per user and the old open/close-per-
+...               ping pattern produced 6+ logins per node per run - failures
+...               from session exhaustion look exactly like fabric faults.
+...               Reuse brings two obligations that a fresh session did not
+...               have: the buffer must be drained before each command, and a
+...               session whose prompt was never matched must be DISCARDED
+...               rather than returned to the pool, since its unconsumed bytes
+...               would be read as the next command's output.
+...
 ...               ROBOT ESCAPING NOTE: no regexp in this file contains a
 ...               backslash. Robot strips a backslash before any character that
 ...               is not a recognised escape, so a cell containing '\d' arrives
 ...               as 'd' and the pattern silently never matches. Character
 ...               classes ([0-9], [ ], [^:]) are used instead - they are immune
 ...               to that transformation and survive copy/paste.
+...
+...               EVALUATE SCOPE NOTE: never reference a $var inside a list or
+...               generator comprehension passed to Evaluate. $var populates the
+...               eval LOCALS, and a comprehension's nested scope cannot read
+...               enclosing locals - only the outermost iterable is evaluated
+...               eagerly in the calling scope. Pass such values via namespace=
+...               (which becomes the eval GLOBALS) and drop the $ sigil, or do
+...               the work in plain Robot keywords.
 Library           Process
 Library           Collections
 Library           String
 Library           SSHLibrary
 Suite Setup       Probe Runner Capabilities
-Suite Teardown    Close All Connections
+Suite Teardown    Tear Down Fabric Sessions
 Test Tags         apic    day2    operational    traffic
 
 *** Variables ***
@@ -81,6 +100,14 @@ ${MGMT_VRF}               mgmt:inb
 ${SWITCH_PROMPT}          REGEXP:[#] *$
 # iping -c 3 takes ~3s. 20s is ample.
 ${SSH_READ_TIMEOUT}       20s
+# Optional pager-disable command run once per session. Left EMPTY by default:
+# iping output is ~8 lines so paging never triggers, and an unsupported command
+# would put an error into the buffer for no benefit. Set to 'terminal length 0'
+# only if a --More-- ever appears in a captured output.
+${SWITCH_PAGER_OFF}       %{SWITCH_PAGER_OFF=}
+# Attempts per iping. 2 = one reuse attempt plus one fresh-session retry, which
+# covers a session idled out by exec-timeout between tests.
+${SSH_MAX_ATTEMPTS}       ${2}
 
 # ─── change scoping ───
 # Comma-separated subnet CIDRs extracted from plan.json, e.g.
@@ -100,6 +127,12 @@ ${DIG_AVAILABLE}          ${False}
 ${SSH_CONFIGURED}         ${False}
 ${USE_KEY_AUTH}           ${False}
 &{NODE_IPS}
+# node IP -> SSHLibrary connection index. Declared here so the dict object
+# exists for the whole suite and can be mutated in place by Set To Dictionary;
+# with pabot each process holds its own pool, which is correct - a session
+# cannot be shared across processes.
+&{SSH_POOL}
+${SSH_OPEN_COUNT}         ${0}
 
 *** Keywords ***
 Probe Runner Capabilities
@@ -124,6 +157,17 @@ Probe Runner Capabilities
     ELSE
         Log    NODE_MGMT_MAP / SWITCH_USER / credential not set - fabric iping tests will skip    WARN
     END
+
+Tear Down Fabric Sessions
+    [Documentation]    Reports how many logins this process actually needed, then
+    ...                closes everything. The count is the pooling metric: with
+    ...                the old open-per-ping pattern it equalled the number of
+    ...                iping calls; it should now equal the number of distinct
+    ...                nodes touched, plus one per stale-session retry.
+    ${still_pooled}=    Get Length    ${SSH_POOL}
+    Log    fabric SSH logins this process: ${SSH_OPEN_COUNT} (pooled at teardown: ${still_pooled})
+    Run Keyword And Ignore Error    Close All Connections
+    Evaluate    $SSH_POOL.clear()
 
 Normalise Boolean Flags
     [Documentation]    An environment or --variable override arrives as a STRING,
@@ -225,30 +269,58 @@ Subnet Is In Scope
     ...                subnet appears in it. Compares the full CIDR and the bare
     ...                host address, so either extraction form from plan.json
     ...                works.
+    ...
+    ...                namespace= puts these values in the eval GLOBALS, which a
+    ...                generator expression's nested scope CAN read - see the
+    ...                EVALUATE SCOPE NOTE in the suite documentation. The names
+    ...                are written WITHOUT the $ sigil: inside namespace= they
+    ...                are plain Python names, and a $ prefix would route them
+    ...                back to locals and reintroduce the failure.
+    ...
+    ...                Fails OPEN. A broken scope check must degrade to a full
+    ...                sweep, never to a false failure in front of an approval
+    ...                gate.
     [Arguments]    ${subnet_cidr}
     ${raw}=    Strip String    ${CHANGED_SUBNETS}
     IF    $raw == ''
         RETURN    ${True}
     END
-    ${host}=    Evaluate    $subnet_cidr.split('/')[0]
-    ${hit}=    Evaluate
-    ...    any(t.strip() == $subnet_cidr or t.strip().split('/')[0] == $host for t in $raw.split(',') if t.strip())
+    # Fetch From Left, not split('/')[0] - it returns the whole string when the
+    # separator is absent, which is the wanted behaviour for a bare host address.
+    ${host}=    Fetch From Left    ${subnet_cidr}    /
+    ${ns}=    Create Dictionary
+    ...    subnet_cidr=${subnet_cidr}
+    ...    host=${host}
+    ...    raw=${raw}
+    ${status}    ${hit}=    Run Keyword And Ignore Error
+    ...    Evaluate
+    ...    any(t.strip() == subnet_cidr or t.strip().split('/')[0] == host for t in raw.split(',') if t.strip())
+    ...    namespace=${ns}
+    IF    $status != 'PASS'
+        Log    Scope check failed (${hit}) - treating ${subnet_cidr} as in scope    WARN
+        RETURN    ${True}
+    END
     RETURN    ${hit}
 
+# ─────────────────── pooled fabric SSH ───────────────────
+
 Open Switch Session
-    [Documentation]    Opens an interactive shell on a leaf. invoke_shell()
-    ...                requests a PTY, which is mandatory for iping - the
-    ...                non-PTY exec channel returns only newlines on this
-    ...                platform.
+    [Documentation]    Opens an interactive shell on a leaf and registers it in
+    ...                the pool. invoke_shell() requests a PTY, which is
+    ...                mandatory for iping - the non-PTY exec channel returns
+    ...                only newlines on this platform.
     ...
     ...                Login consumes the MOTD up to the first prompt, so the
-    ...                buffer is clean before the command is written.
+    ...                buffer is clean before the first command is written. This
+    ...                is why reuse needs an explicit drain but a fresh session
+    ...                does not.
     ...
     ...                Never run with --loglevel DEBUG or nac-test --verbose -
     ...                SSHLibrary logs keyword arguments at DEBUG, and log.html
     ...                is published to GitHub Pages.
     [Arguments]    ${switch_ip}
-    Open Connection    ${switch_ip}
+    ${index}=    Open Connection    ${switch_ip}
+    ...    alias=${switch_ip}
     ...    prompt=${SWITCH_PROMPT}
     ...    term_type=vt100    width=200    height=5000
     ...    timeout=${SSH_READ_TIMEOUT}
@@ -257,9 +329,105 @@ Open Switch Session
     ELSE
         Login    ${SWITCH_USER}    ${SWITCH_PASSWORD}    delay=0.5s
     END
+    IF    $SWITCH_PAGER_OFF != ''
+        Run Keyword And Ignore Error    Write    ${SWITCH_PAGER_OFF}
+        Run Keyword And Ignore Error    Read Until Prompt    strip_prompt=${True}
+    END
+    Set To Dictionary    ${SSH_POOL}    ${switch_ip}    ${index}
+    ${n}=    Evaluate    $SSH_OPEN_COUNT + 1
+    Set Suite Variable    ${SSH_OPEN_COUNT}    ${n}
+    Log    opened SSH session ${index} to ${switch_ip} (login #${n} in this process)
+    RETURN    ${index}
+
+Ensure Switch Session
+    [Documentation]    Returns with a usable session for this node selected as the
+    ...                active connection. Reuses the pooled session when there is
+    ...                one; Switch Connection failing means the entry is stale, so
+    ...                it is dropped and a fresh session opened.
+    ...
+    ...                Note that Switch Connection succeeding does NOT prove the
+    ...                socket is alive - a session idled out by exec-timeout still
+    ...                switches cleanly. That case is caught by the read failing in
+    ...                Fabric Ping, which retries on a fresh session. Probing here
+    ...                instead would cost a round trip before every single iping.
+    [Arguments]    ${switch_ip}
+    ${pooled}=    Evaluate    $switch_ip in $SSH_POOL
+    IF    ${pooled}
+        ${index}=    Set Variable    ${SSH_POOL}[${switch_ip}]
+        ${status}    ${msg}=    Run Keyword And Ignore Error    Switch Connection    ${index}
+        IF    $status == 'PASS'
+            RETURN    ${index}
+        END
+        Log    pooled session ${index} for ${switch_ip} is unusable (${msg}) - reopening    WARN
+        Remove From Dictionary    ${SSH_POOL}    ${switch_ip}
+    END
+    ${index}=    Open Switch Session    ${switch_ip}
+    RETURN    ${index}
+
+Invalidate Switch Session
+    [Documentation]    Removes a node's session from the pool and closes it, so the
+    ...                next command opens a clean one.
+    ...
+    ...                The not-pooled branch closes the CURRENT connection instead:
+    ...                that is the case where Open Connection succeeded but Login
+    ...                failed, leaving a live socket that was never registered.
+    [Arguments]    ${switch_ip}
+    ${pooled}=    Evaluate    $switch_ip in $SSH_POOL
+    IF    ${pooled}
+        ${index}=    Set Variable    ${SSH_POOL}[${switch_ip}]
+        Run Keyword And Ignore Error    Switch Connection    ${index}
+        Run Keyword And Ignore Error    Close Connection
+        Remove From Dictionary    ${SSH_POOL}    ${switch_ip}
+        Log    discarded pooled session ${index} for ${switch_ip}
+    ELSE
+        Run Keyword And Ignore Error    Close Connection
+    END
+
+Drain Switch Buffer
+    [Documentation]    Discards anything already pending on the active session
+    ...                before a new command is written.
+    ...
+    ...                Mandatory once sessions are reused: a late-arriving tail
+    ...                from the previous command would otherwise be returned as
+    ...                this command's output, and Count Ping Replies would happily
+    ...                parse the WRONG ping's statistics line. A fresh session
+    ...                never had this exposure because Login drained the MOTD.
+    ${status}    ${residue}=    Run Keyword And Ignore Error    Read    delay=0.2s
+    IF    $status == 'PASS' and $residue.strip() != ''
+        Log    discarded stale buffer before command: ${residue}    WARN
+    END
+
+Run Iping Over Session
+    [Documentation]    One attempt at running a command on a pooled session.
+    ...                Raises on no usable output so the caller can retry.
+    ...
+    ...                On a prompt timeout the session is DISCARDED even when the
+    ...                buffered fallback recovered text, because an unmatched
+    ...                prompt means unread bytes remain queued. Returning it to the
+    ...                pool would contaminate the next command on that node.
+    [Arguments]    ${switch_ip}    ${cmd}
+    Ensure Switch Session    ${switch_ip}
+    Drain Switch Buffer
+    Write    ${cmd}
+    ${status}    ${out}=    Run Keyword And Ignore Error
+    ...    Read Until Prompt    strip_prompt=${True}
+    IF    $status == 'PASS'
+        RETURN    ${out}
+    END
+    Log    Prompt ${SWITCH_PROMPT} not seen within ${SSH_READ_TIMEOUT} on ${switch_ip}; falling back to a buffered read. Detail: ${out}    WARN
+    ${fb_status}    ${fb_out}=    Run Keyword And Ignore Error    Read    delay=5s
+    Invalidate Switch Session    ${switch_ip}
+    IF    $fb_status != 'PASS'
+        Fail    buffered read failed on ${switch_ip}: ${fb_out}
+    END
+    IF    $fb_out.strip() == ''
+        Fail    no output from ${switch_ip} after prompt timeout and buffered read
+    END
+    RETURN    ${fb_out}
 
 Fabric Ping
-    [Documentation]    Runs iping ON a leaf and returns the raw output.
+    [Documentation]    Runs iping ON a leaf over a pooled session and returns the
+    ...                raw output.
     ...
     ...                Uses Write + Read Until Prompt, NOT Execute Command.
     ...                Verified on this fabric: the non-PTY exec channel returns
@@ -267,9 +435,14 @@ Fabric Ping
     ...                codes are unavailable in shell mode and would be
     ...                untrustworthy regardless - callers parse the text.
     ...
-    ...                A failed session returns an SSH-ERROR string rather than
-    ...                raising, so the caller reports a specific assertion
-    ...                instead of an opaque library error.
+    ...                Attempts up to SSH_MAX_ATTEMPTS times, discarding the
+    ...                session between attempts. This is what makes pooling safe
+    ...                against exec-timeout: the first attempt on a long-idle
+    ...                session may fail, the second runs on a fresh login.
+    ...
+    ...                A session that cannot be established returns an SSH-ERROR
+    ...                string rather than raising, so the caller reports a
+    ...                specific assertion instead of an opaque library error.
     [Arguments]    ${switch_ip}    ${vrf}    ${dest}    ${source}=${EMPTY}
     ${cmd}=    Set Variable    iping -V ${vrf} -c ${PING_COUNT}
     IF    $source != ''
@@ -277,25 +450,20 @@ Fabric Ping
     END
     ${cmd}=    Set Variable    ${cmd} ${dest}
     ${raw}=    Set Variable    ${EMPTY}
-    TRY
-        Open Switch Session    ${switch_ip}
-        Write    ${cmd}
-        ${status}    ${result}=    Run Keyword And Ignore Error
-        ...    Read Until Prompt    strip_prompt=${True}
-        IF    $status == 'PASS'
-            ${raw}=    Set Variable    ${result}
-        ELSE
-            Log    Prompt ${SWITCH_PROMPT} not seen within ${SSH_READ_TIMEOUT}; falling back to a buffered read. Detail: ${result}    WARN
-            ${fs}    ${fr}=    Run Keyword And Ignore Error    Read    delay=5s
-            IF    $fs == 'PASS'
-                ${raw}=    Set Variable    ${fr}
-            END
+    ${last_err}=    Set Variable    no attempt made
+    FOR    ${attempt}    IN RANGE    1    ${SSH_MAX_ATTEMPTS} + 1
+        ${status}    ${value}=    Run Keyword And Ignore Error
+        ...    Run Iping Over Session    ${switch_ip}    ${cmd}
+        IF    $status == 'PASS' and $value.strip() != ''
+            ${raw}=    Set Variable    ${value}
+            BREAK
         END
-    EXCEPT    *    type=GLOB    AS    ${err}
-        Log    SSH session to ${switch_ip} failed: ${err}    WARN
-        ${raw}=    Set Variable    SSH-ERROR: ${err}
-    FINALLY
-        Run Keyword And Ignore Error    Close Connection
+        ${last_err}=    Set Variable    ${value}
+        Log    attempt ${attempt}/${SSH_MAX_ATTEMPTS} of "${cmd}" on ${switch_ip} produced nothing (${value}) - discarding session    WARN
+        Invalidate Switch Session    ${switch_ip}
+    END
+    IF    $raw.strip() == ''
+        ${raw}=    Set Variable    SSH-ERROR: ${last_err}
     END
     # A PTY emits CRLF, and layered TTYs can double the CR. Normalise so the
     # statistics patterns see plain newlines. \r and \n ARE recognised Robot
@@ -355,12 +523,19 @@ Fabric Ping Should Succeed
     ...                the command was rejected, the harness captured nothing, or
     ...                the ping genuinely lost every packet. Only the last is a
     ...                fabric finding.
+    ...
+    ...                'no route to host' is deliberately NOT in the did-not-run
+    ...                token list. Every other token there means iping never
+    ...                executed; that one means it executed and routing failed,
+    ...                which for a newly added subnet is the single most valuable
+    ...                finding this suite can produce. It must fall through to the
+    ...                total-loss branch so the message names the real cause.
     [Arguments]    ${switch_ip}    ${vrf}    ${dest}    ${source}=${EMPTY}    ${label}=${EMPTY}
     ${out}=    Fabric Ping    ${switch_ip}    ${vrf}    ${dest}    ${source}
     ${lower}=    Convert To Lower Case    ${out}
     FOR    ${bad}    IN    ssh-error    authentication    permission denied
     ...    unknown vrf    no such vrf    cannot find    bad source
-    ...    % invalid    syntax error    no route to host
+    ...    % invalid    syntax error
         # $bad / $lower, not '${bad}' in '''${lower}''' - the latter injects the
         # full multi-line output into the expression source and raises
         # SyntaxError: unterminated string literal.
@@ -529,6 +704,10 @@ Fabric Reach DNS From {{ tenant.name }} {{ bd.name }} Gateway {{ gw }}
     ...                resolver, inside {{ tenant.name }}:{{ bd.vrf }}. This is
     ...                the check that most often catches a subnet added without
     ...                the matching contract or route leak.
+    ...
+    ...                The loop below is the main beneficiary of session pooling:
+    ...                it previously opened one SSH session per resolver, and now
+    ...                reuses a single session for all of them.
     [Tags]    fabric-icmp    d2d    shared-services
     ${in_scope}=    Subnet Is In Scope    {{ subnet.ip }}
     Skip If    not ${in_scope}
@@ -589,6 +768,9 @@ Fabric Nodes Reach DNS In Management VRF
     ...                MGMT_VRF defaults to mgmt:inb. Out-of-band lives in a
     ...                separate namespace and may need plain ping rather than
     ...                iping - confirm with 'show vrf' on a leaf.
+    ...
+    ...                Nested loop, nodes x resolvers: previously one login per
+    ...                iteration, now one per node for the whole test.
     [Tags]    baseline    fabric-icmp    d2d
     Skip If    not ${SSH_CONFIGURED}
     ...    NODE_MGMT_MAP / SWITCH_USER / credential not configured - no fabric SSH target
