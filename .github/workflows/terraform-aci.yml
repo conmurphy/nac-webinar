@@ -21,7 +21,7 @@ on:
       baseline:
         description: 'ND baseline: latest is instant using the latest snapshot, analyze runs a new analysis job (10 - 15 minutes)'
         required: true
-        default: 'latest'
+        default: 'analyze'
         type: choice
         options: [latest, analyze]
 
@@ -262,7 +262,7 @@ jobs:
         id: ndpayload
         if: steps.plan.outputs.exitcode == '2'
         run: |
-          # this was the error from ND which failed
+          # Formatting the plan correctly
           # ND wants double brackets; the plan produced single.
           #  Rn 'rsnodeL3OutAtt-[topology/pod-1/node-1101]' does not match expected
           #  rn 'rsnodeL3OutAtt-[[topology/pod-1/node-1101]]'
@@ -1004,7 +1004,14 @@ jobs:
             echo "Fabric ICMP scope: \`${SCOPE:-all configured subnets}\`"
             echo ''
             if [ "${FAILED:-0}" = "0" ] && [ "${TOTAL:-0}" != "0" ]; then
-              echo "✅ **${PASSED:-0} of ${TOTAL} operational tests passed.** Fabric-sourced ICMP from each BD anycast gateway (iping on a border leaf, inside the tenant VRF), client reachability to those same gateways over the L3Out, static path bindings and encap, L3Out BGP state, vPC state, interface state, and shared-services DNS."
+              echo "✅ **${PASSED:-0} of ${TOTAL} operational tests passed.** 
+              echo "- Fabric-sourced ICMP from each BD anycast gateway (iping on a border leaf, inside the tenant VRF)""
+              echo "- Client reachability to those same gateways over the L3Out"
+              echo "- Static path bindings and encap
+              echo "- L3Out BGP state
+              echo "- vPC state
+              echo "- Interface state
+              echo "- DNS reachability"
             elif [ "${TOTAL:-0}" = "0" ]; then
               echo "⚠️ **No tests ran** - check the nac-test step logs (template render, missing SSHLibrary, or credential failure)."
             else
