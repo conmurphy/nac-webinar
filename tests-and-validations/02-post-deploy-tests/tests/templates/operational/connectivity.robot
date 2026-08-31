@@ -781,6 +781,9 @@ Runner Ping Gateway {{ gw }} In {{ tenant.name }} BD {{ bd.name }}
 
 {%-     endif %}
 {%-   endfor %}
+{%- endif %}
+{%- endfor %}
+{%- endfor %}
 
 # ─── management-VRF reachability per node (baseline, not change-scoped) ───
 Fabric Nodes Reach DNS In Management VRF
