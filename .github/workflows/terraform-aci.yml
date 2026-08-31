@@ -79,6 +79,10 @@ jobs:
         run: |
           bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
           ./actionlint -shellcheck=shellcheck
+      - name: zizmor
+        run: |
+          pipx install zizmor
+          zizmor .github/workflows/
   # ══════════════════════════════════════════════════════════
   # JOB 1 — Plan + Nexus Dashboard pre-change analysis
   # Any branch or PR. No approval required.
@@ -313,7 +317,7 @@ jobs:
         id: baseline
         if: steps.plan.outputs.exitcode == '2'
         run: |
-          strategy="${{ github.event.inputs.baseline || 'latest' }}"
+          strategy="${{ github.event.inputs.baseline || 'analyze' }}"
           echo "baseline strategy: ${strategy}"
 
           set +e
@@ -387,16 +391,22 @@ jobs:
               }
             ' nd-prechange.md
           }
+
           crit="$(sev_count critical)"; maj="$(sev_count major)"
           min="$(sev_count minor)";    warn="$(sev_count warning)"
-          echo "critical=${crit:-0}" >> "$GITHUB_OUTPUT"
-          echo "major=${maj:-0}"     >> "$GITHUB_OUTPUT"
-          echo "minor=${min:-0}"     >> "$GITHUB_OUTPUT"
-          echo "warning=${warn:-0}"  >> "$GITHUB_OUTPUT"
+          {
+            echo "critical=${crit:-0}"
+            echo "major=${maj:-0}"
+            echo "minor=${min:-0}"
+            echo "warning=${warn:-0}"
+          } >> "$GITHUB_OUTPUT"
           echo "new anomalies - critical:${crit:-0} major:${maj:-0} minor:${min:-0} warning:${warn:-0}"
 
           job_id="$(awk -F'|' '$2 ~ /^ *job_id *$/ {gsub(/^ +| +$/,"",$3); print $3; exit}' nd-prechange.md)"
-          echo "job_id=${job_id}" >> "$GITHUB_OUTPUT"
+          {
+            echo "job_id=${job_id}"
+            echo "gate_ran=true"
+          } >> "$GITHUB_OUTPUT"
           echo "job_id: ${job_id:-<none>}"
           echo "gate_ran=true" >> "$GITHUB_OUTPUT"
 
@@ -586,7 +596,7 @@ jobs:
               [ -n "$ND_LINK" ] && echo "🔗 [Nexus Dashboard pre-change analysis hub](${ND_LINK})" && echo ''
 
               if [ -s nd-anomalies.md ]; then
-                echo '#### Fabric anomaly context'
+                echo '### Fabric anomaly context'
                 echo ''
                 cat nd-anomalies.md
                 echo ''
@@ -1260,13 +1270,9 @@ jobs:
             # green change-verification verdict.
             if [ -s "${BASELINE_FAILURES_FILE}" ]; then
               echo ''
-              echo '<details><summary>Fabric baseline failures (informational - not caused by this change)</summary>'
+              echo '### Fabric baseline failures (informational - not caused by this change)'
               echo ''
               cat "${BASELINE_FAILURES_FILE}"
               echo ''
-              echo '</details>'
             fi
-
-            echo ''
-            echo '> Fabric baseline tests (hardware, management-VRF reachability, external HTTPS, name resolution) run separately and are informational - they reflect pre-existing fabric and upstream state, not this change.'
           } >> "$GITHUB_STEP_SUMMARY"

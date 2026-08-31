@@ -1,0 +1,6 @@
+# actionlint cannot enumerate self-hosted runner labels, so declare them here.
+# Both the plan and apply jobs target [self-hosted, openshift, aci].
+self-hosted-runner:
+  labels:
+    - openshift
+    - aci
