@@ -995,16 +995,25 @@ jobs:
           python3 - <<'PY'
           import xml.etree.ElementTree as ET, os
 
-          # Two separate files. The change-scope table gates the summary
-          # verdict; baseline is informational and must not appear under a
-          # green headline as though it were change impact.
+          # Two separate files. The change-scope failures gate the summary
+          # verdict; baseline is informational and must not appear under a green
+          # headline as though it were change impact.
           SOURCES = (
               ("change",   "nac-test-results/robot_results/output.xml",  "nac-test-failures.md"),
               ("baseline", "nac-test-baseline/robot_results/output.xml", "nac-test-baseline-failures.md"),
           )
 
-          def esc(s):
-              return " ".join((s or "").split()).replace("|", "&#124;")
+          # Heading + body text rather than a table row, so there is no column to
+          # fit and no '|' to escape. The cap is generous but not unbounded:
+          # Robot appends its own detail to some failures, and
+          # $GITHUB_STEP_SUMMARY is capped at 1 MiB per step.
+          MAX_MSG = 1200
+
+          def collapse(s):
+              # Robot messages are often multi-line. Collapsing to a single
+              # paragraph keeps each failure to one readable block; the full
+              # multi-line form stays available in log.html.
+              return " ".join((s or "").split())
 
           for label, path, out in SOURCES:
               rows, ran = [], 0
@@ -1014,15 +1023,19 @@ jobs:
                       st = tc.find("status")
                       if st is None or st.get("status") != "FAIL":
                           continue
-                      rows.append((tc.get("name"), esc(st.text[:400])[:200]))
+                      msg = collapse(st.text)
+                      if len(msg) > MAX_MSG:
+                          msg = msg[:MAX_MSG].rstrip() + " ... (truncated - see the full report)"
+                      rows.append((
+                          collapse(tc.get("name")),
+                          msg or "_No failure message recorded._",
+                      ))
 
               # Written EMPTY when there are no failures, so `[ -s file ]` is
               # false and the summary omits the section entirely.
               with open(out, "w", encoding="utf-8") as fh:
-                  if rows:
-                      fh.write("| test | reason |\n| --- | --- |\n")
-                      for name, msg in rows:
-                          fh.write(f"| {esc(name)} | {msg} |\n")
+                  for name, msg in rows:
+                      fh.write(f"#### {name}\n\n{msg}\n\n")
 
               print(f"{label:9s}: {len(rows)} failed of {ran} ran -> {out}")
           PY
@@ -1291,24 +1304,28 @@ jobs:
               echo "📊 Interactive report not published (staged=${PAGES_STAGED:-n/a}, deploy=${PAGES_DEPLOY:-n/a}) - download the \`nac-test-reports\` artifact from [this run](${RUN_URL}#artifacts)."
             fi
 
-            # Change-scope failures gate the verdict above.
+            # Change-scope failures gate the verdict above. Not wrapped in
+            # <details>: it was always open, and h4 headings inside a details
+            # element render but lose their anchors.
             if [ -s "${FAILURES_FILE}" ]; then
               echo ''
-              echo '<details open><summary>Failed change-verification tests</summary>'
+              echo '### Failed change-verification tests'
               echo ''
               cat "${FAILURES_FILE}"
+            fi
+
+            # Baseline failures are pre-existing fabric/upstream state. Kept
+            # collapsed so they never appear to contradict a green
+            # change-verification verdict.
+            if [ -s "${BASELINE_FAILURES_FILE}" ]; then
+              echo ''
+              echo '<details><summary>Fabric baseline failures (informational - not caused by this change)</summary>'
+              echo ''
+              cat "${BASELINE_FAILURES_FILE}"
               echo ''
               echo '</details>'
             fi
 
-            # Baseline failures are pre-existing fabric/upstream state. Kept in
-            # a separate collapsed block so they never appear to contradict a
-            # green change-verification verdict.
-            if [ -s "${BASELINE_FAILURES_FILE}" ]; then
-              echo ''
-              echo '### Fabric baseline failures'
-              echo ''
-              cat "${BASELINE_FAILURES_FILE}"
-              echo ''
-            fi
+            echo ''
+            echo '> Fabric baseline tests (hardware, management-VRF reachability, external HTTPS, name resolution) run separately and are informational - they reflect pre-existing fabric and upstream state, not this change.'
           } >> "$GITHUB_STEP_SUMMARY"
