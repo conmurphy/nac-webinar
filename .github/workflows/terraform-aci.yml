@@ -334,9 +334,9 @@ jobs:
           # 'analyze' is the dispatch-time default.
           # On push the input is unset, and 'latest' keeps the pipeline fast -
           # a fresh analysis adds 10-15 min
-          BASELINE_STRATEGY: ${{ github.event.inputs.baseline || 'latest' }}
+          BASELINE_STRATEGY: ${{ github.event.inputs.baseline || 'analyze' }}
         run: |
-          strategy="${BASELINE_STRATEGY:-latest}"
+          strategy="${BASELINE_STRATEGY:analyze}"
           echo "baseline strategy: ${strategy}"
 
           set +e
@@ -1300,7 +1300,7 @@ jobs:
 
             if [ "${SKIPPED:-0}" != "0" ]; then
               echo ''
-              echo "ℹ️ ${SKIPPED} test(s) skipped - either outside the change scope, or NODE_MGMT_MAP / SWITCH_USER not configured. Skipped tests verified nothing."
+              echo "ℹ️ ${SKIPPED} test(s) skipped - either outside the change scope, or NODE_MGMT_MAP / SWITCH_USER not configured."
             fi
 
             echo ''
@@ -1335,13 +1335,10 @@ jobs:
             # change-verification verdict.
             if [ -s "${BASELINE_FAILURES_FILE}" ]; then
               echo ''
-              echo '<details><summary>Fabric baseline failures (informational - not caused by this change)</summary>'
+              echo '### Fabric baseline failures (informational)'
               echo ''
               cat "${BASELINE_FAILURES_FILE}"
               echo ''
-              echo '</details>'
             fi
-
             echo ''
-            echo '> Fabric baseline tests (hardware, management-VRF reachability, external HTTPS, name resolution) run separately and are informational - they reflect pre-existing fabric and upstream state, not this change.'
           } >> "$GITHUB_STEP_SUMMARY"

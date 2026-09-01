@@ -675,13 +675,13 @@ Fail If
 {#-       Messages carry NO double spaces - two spaces is Robot's argument       -#}
 {#-       separator and would split the message into extra arguments.            -#}
 {%-       if is_public and not has_l3out %}
-{%-         set misconfig_msg = subnet.ip ~ ' is public:true but BD ' ~ bd.name ~ ' has no l3outs - nothing advertises this subnet out of the fabric, so the gateway cannot be reached externally and no return path exists. Either associate an l3out with the BD or set public: false.' %}
+{%-         set misconfig_msg = subnet.ip ~ ' is `public:true` but BD ' ~ bd.name ~ ' has no l3outs so the subnet is not advertised out of the fabric.' %}
 {%-       elif has_l3out and not is_public %}
-{%-         set misconfig_msg = 'BD ' ~ bd.name ~ ' is associated with l3out ' ~ l3out_list ~ ' but subnet ' ~ subnet.ip ~ ' is not public:true, so it will not be advertised out of that L3Out. Either set public: true or remove the l3out association.' %}
+{%-         set misconfig_msg = 'BD ' ~ bd.name ~ ' is associated with l3out ' ~ l3out_list ~ ' but subnet ' ~ subnet.ip ~ ' is not `public:true`, so it will not be advertised out of the L3Out.' %}
 {%-       else %}
 {%-         set misconfig_msg = 'data model is consistent' %}
 {%-       endif %}
-{%-       set internal_msg = subnet.ip ~ ' is internal by design (public is not set and BD ' ~ bd.name ~ ' has no l3outs) so there is no external path to verify' %}
+{%-       set internal_msg = subnet.ip ~ ' is not set as public and BD ' ~ bd.name ~ ' has no l3outs so there is no external path to verify' %}
 
 # Fabric Egress From {{ tenant.name }} {{ bd.name }} Gateway {{ gw }}
 ICMP From Fabric Gateway {{ gw }} In {{ tenant.name }} BD {{ bd.name }} To Internet
