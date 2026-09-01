@@ -683,7 +683,8 @@ Fail If
 {%-       endif %}
 {%-       set internal_msg = subnet.ip ~ ' is internal by design (public is not set and BD ' ~ bd.name ~ ' has no l3outs) so there is no external path to verify' %}
 
-Fabric Egress From {{ tenant.name }} {{ bd.name }} Gateway {{ gw }}
+# Fabric Egress From {{ tenant.name }} {{ bd.name }} Gateway {{ gw }}
+ICMP From Fabric Gateway {{ gw }} In {{ tenant.name }} BD {{ bd.name }} To Internet
     [Documentation]    iping on a border leaf, sourced from the BD anycast
     ...                gateway {{ gw }} in VRF {{ tenant.name }}:{{ bd.vrf }},
     ...                towards ${FABRIC_EXT_TARGET}.
@@ -716,7 +717,8 @@ Fabric Egress From {{ tenant.name }} {{ bd.name }} Gateway {{ gw }}
     ...    {{ gw }}
     ...    label=egress from {{ bd.name }} gw {{ gw }} (node ${node}[0])
 
-Fabric Reach DNS From {{ tenant.name }} {{ bd.name }} Gateway {{ gw }}
+# Fabric Reach DNS From {{ tenant.name }} {{ bd.name }} Gateway {{ gw }}
+ICMP From Fabric Gateway {{ gw }} In {{ tenant.name }} BD {{ bd.name }} To DNS Servers
     [Documentation]    iping from the BD gateway to each shared-services
     ...                resolver, inside {{ tenant.name }}:{{ bd.vrf }}. This is
     ...                the check that most often catches a subnet added without
@@ -744,7 +746,8 @@ Fabric Reach DNS From {{ tenant.name }} {{ bd.name }} Gateway {{ gw }}
         ...    label=dns ${srv} from {{ bd.name }} gw {{ gw }}
     END
 
-Runner Ping Gateway {{ gw }} In {{ tenant.name }} BD {{ bd.name }}
+# Runner Ping Gateway {{ gw }} In {{ tenant.name }} BD {{ bd.name }}
+ICMP From Client To Gateway {{ gw }} In {{ tenant.name }} BD {{ bd.name }}
     [Documentation]    ICMP from the CI container to the BD anycast gateway.
     ...
     ...                Valid only when the subnet is public:true behind an
@@ -758,7 +761,7 @@ Runner Ping Gateway {{ gw }} In {{ tenant.name }} BD {{ bd.name }}
     ...
     ...                Data model at render time: public={{ is_public }},
     ...                l3outs={{ l3out_list }}.
-    [Tags]    fabric-ping    l3out-north-south    icmp
+    [Tags]    client-icmp    l3out-north-south    icmp
     ${in_scope}=    Subnet Is In Scope    {{ subnet.ip }}
     Skip If    not ${in_scope}
     ...    {{ subnet.ip }} is not part of this change (CHANGED_SUBNETS=${CHANGED_SUBNETS})
