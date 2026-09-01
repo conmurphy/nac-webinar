@@ -1,59 +1,29 @@
 *** Settings ***
 Documentation     Post-change connectivity verification for the ACI fabric.
 ...
-...               Two vantage points, deliberately kept distinct:
+...               Test cases are rendered from the data model for every subnet
+...               that has a gateway and a resolvable candidate leaf. Whether a
+...               subnet CAN be reached externally is then decided in the test
+...               body, not at render time, so an unreachable subnet produces a
+...               visible SKIP or FAIL rather than silently vanishing from the
+...               report:
 ...
-...               1. FABRIC-SOURCED - iping executed ON a border leaf, sourced
-...                  from the BD anycast gateway. Proves the pervasive SVI is
-...                  deployed, unicast routing is on, the subnet is advertised
-...                  out the L3Out, the contract permits ICMP, and return
-...                  traffic lands. This is the authoritative post-change check.
+...                 public true  + l3out present -> run the check
+...                 public true  + l3out absent  -> FAIL, advertised nowhere
+...                 public false + l3out present -> FAIL, l3out cannot carry it
+...                 public false + l3out absent  -> SKIP, internal by design
 ...
-...               2. RUNNER-SOURCED - ping / dig / curl from the CI container.
-...                  Valid on this fabric only because every subnet is
-...                  public:true behind l3out-to-core-01, so the gateways are
-...                  reachable from the cluster pod network. Proves the
-...                  north-south path in the opposite direction.
+...               CHANGED_SUBNETS then narrows execution to the subnets touched
+...               by this change; when it is empty the full configured set runs
+...               as a regression sweep.
 ...
-...               Test cases are rendered from the data model. A subnet is
-...               eligible only when its BD has a VRF, the subnet is public, and
-...               border-leaf nodes are resolvable - otherwise no test case is
-...               emitted at all. CHANGED_SUBNETS then narrows execution to the
-...               subnets touched by this change; when it is empty the full
-...               configured set runs as a regression sweep.
-...
-...               TRANSPORT NOTE: iping is a VSH-hosted wrapper that writes to a
-...               controlling terminal. The non-PTY SSH exec channel discards its
-...               output while still exiting 0 - verified on this fabric, where
-...               exec_command returned exactly five newlines. This suite must
-...               therefore use Login + Write + Read Until Prompt, which requests
-...               a PTY via invoke_shell(). Never use Execute Command here.
-...
-...               SESSION POOLING NOTE: sessions are opened once per node and
-...               reused for every iping against that node, because ACI leaves
-...               cap concurrent sessions per user and the old open/close-per-
-...               ping pattern produced 6+ logins per node per run - failures
-...               from session exhaustion look exactly like fabric faults.
-...               Reuse brings two obligations that a fresh session did not
-...               have: the buffer must be drained before each command, and a
-...               session whose prompt was never matched must be DISCARDED
-...               rather than returned to the pool, since its unconsumed bytes
-...               would be read as the next command's output.
-...
-...               ROBOT ESCAPING NOTE: no regexp in this file contains a
-...               backslash. Robot strips a backslash before any character that
-...               is not a recognised escape, so a cell containing '\d' arrives
-...               as 'd' and the pattern silently never matches. Character
-...               classes ([0-9], [ ], [^:]) are used instead - they are immune
-...               to that transformation and survive copy/paste.
-...
-...               EVALUATE SCOPE NOTE: never reference a $var inside a list or
-...               generator comprehension passed to Evaluate. $var populates the
-...               eval LOCALS, and a comprehension's nested scope cannot read
-...               enclosing locals - only the outermost iterable is evaluated
-...               eagerly in the calling scope. Pass such values via namespace=
-...               (which becomes the eval GLOBALS) and drop the $ sigil, or do
-...               the work in plain Robot keywords.
+...               TEMPLATE WHITESPACE NOTE: nac-test renders with
+...               trim_blocks=True, so a Jinja block tag inside a test BODY
+...               swallows the newline that separates the next Robot line and
+...               the two get joined - which silently turned '${in_scope}=' into
+...               a [Tags] value. Never put {% if %} inside a test body. Compute
+...               conditions and messages in the header and emit one
+...               unconditional line with a rendered True/False.
 Library           Process
 Library           Collections
 Library           String
@@ -598,6 +568,24 @@ Resolver Should Answer
     END
     RETURN    ${lines}[0]
 
+Fail If
+    [Documentation]    Fails with a custom message when the condition is true.
+    ...
+    ...                The condition arrives from the template as the literal
+    ...                True or False and Robot evaluates it as a Python
+    ...                expression. Never quote it in the template - the string
+    ...                'False' is non-empty and therefore truthy, which would
+    ...                make every case fail.
+    ...
+    ...                Hard Fail, not Run Keyword And Continue On Failure: a data
+    ...                model inconsistency means the rest of the test cannot
+    ...                produce a meaningful result, so there is nothing to gain
+    ...                by continuing.
+    [Arguments]    ${condition}    ${message}
+    IF    ${condition}
+        Fail    ${message}
+    END
+
 *** Test Cases ***
 {#- ══════════════════════════════════════════════════════════════════ -#}
 {#- Build two node maps per tenant, then intersect them per BD:        -#}
@@ -668,30 +656,32 @@ Resolver Should Answer
 
 
 {%-   for subnet in bd.subnets | default([]) %}
-{#-     Render whenever there is a gateway and a candidate leaf. public /      -#}
-{#-     l3outs are NOT part of this guard: a subnet that cannot be reached      -#}
-{#-     externally must still produce a visible SKIP, otherwise the summary     -#}
-{#-     reports full coverage for a subnet nothing ever probed.                -#}
+{#-     Render whenever there is a gateway and a candidate leaf. Reachability   -#}
+{#-     is NOT part of this guard - deciding it here would omit the test case    -#}
+{#-     entirely and the summary would report full coverage for a subnet that    -#}
+{#-     nothing ever probed.                                                    -#}
 {%-     if subnet.ip is defined and candidates | length > 0 %}
 {%-       set gw = subnet.ip.split('/')[0] %}
-{%-       set is_public = subnet.public | default(false) %}
+{#-       Coerce to a real bool: YAML gives a bool, but a quoted "true" would    -#}
+{#-       otherwise compare unequal to True in the XOR below.                    -#}
+{%-       set is_public = true if subnet.public | default(false) else false %}
 {%-       set bd_l3outs = bd.l3outs | default([]) %}
+{%-       set has_l3out = true if bd_l3outs | length > 0 else false %}
 {%-       set l3out_list = bd_l3outs | join(', ') or 'none' %}
-{%-       set externally_reachable = is_public and bd_l3outs | length > 0 %}
-{#-       Skip reasons are built HERE, never with an if/endif inside a test     -#}
-{#-       body. nac-test renders with trim_blocks=True, so a block tag inside   -#}
-{#-       a body swallows the newline separating the next Robot line and the    -#}
-{#-       two get joined - which silently turned '${in_scope}=' into a [Tags]   -#}
-{#-       value and then into a Skip argument. One unconditional line with a    -#}
-{#-       Jinja-rendered True/False condition is immune to that.                -#}
-{%-       set fabric_skip_msg = subnet.ip ~ ' is not externally reachable by design (public=' ~ is_public ~ ', l3outs=' ~ l3out_list ~ ') so there is no advertised return path; set public: true and associate an l3out to enable this check' %}
-{%-       if not is_public %}
-{%-         set runner_skip_msg = subnet.ip ~ ' is not public:true, so the gateway is not advertised out of the fabric and the runner has no path to it' %}
-{%-       elif bd_l3outs | length == 0 %}
-{%-         set runner_skip_msg = 'BD ' ~ bd.name ~ ' has no l3outs, so nothing advertises ' ~ subnet.ip ~ ' externally and the runner cannot reach ' ~ gw ~ ' even though the subnet is public' %}
+{#-       Inconsistent intent is exactly XOR: one of public / l3out is set and   -#}
+{#-       the other is not. Neither set means internal by design.                -#}
+{%-       set inconsistent = is_public != has_l3out %}
+{%-       set internal_by_design = (not is_public) and (not has_l3out) %}
+{#-       Messages carry NO double spaces - two spaces is Robot's argument       -#}
+{#-       separator and would split the message into extra arguments.            -#}
+{%-       if is_public and not has_l3out %}
+{%-         set misconfig_msg = subnet.ip ~ ' is public:true but BD ' ~ bd.name ~ ' has no l3outs - nothing advertises this subnet out of the fabric, so the gateway cannot be reached externally and no return path exists. Either associate an l3out with the BD or set public: false.' %}
+{%-       elif has_l3out and not is_public %}
+{%-         set misconfig_msg = 'BD ' ~ bd.name ~ ' is associated with l3out ' ~ l3out_list ~ ' but subnet ' ~ subnet.ip ~ ' is not public:true, so it will not be advertised out of that L3Out. Either set public: true or remove the l3out association.' %}
 {%-       else %}
-{%-         set runner_skip_msg = 'runner path is available' %}
+{%-         set misconfig_msg = 'data model is consistent' %}
 {%-       endif %}
+{%-       set internal_msg = subnet.ip ~ ' is internal by design (public is not set and BD ' ~ bd.name ~ ' has no l3outs) so there is no external path to verify' %}
 
 Fabric Egress From {{ tenant.name }} {{ bd.name }} Gateway {{ gw }}
     [Documentation]    iping on a border leaf, sourced from the BD anycast
@@ -706,12 +696,14 @@ Fabric Egress From {{ tenant.name }} {{ bd.name }} Gateway {{ gw }}
     ...                Candidate leaves {{ candidates | join(', ') }}.
     ...
     ...                Data model at render time: public={{ is_public }},
-    ...                l3outs={{ l3out_list }}.
+    ...                l3outs={{ l3out_list }} - inconsistent={{ inconsistent }},
+    ...                internal_by_design={{ internal_by_design }}.
     [Tags]    fabric-icmp    d2d    subnet-egress
-    Skip If    {{ not externally_reachable }}    {{ fabric_skip_msg }}
     ${in_scope}=    Subnet Is In Scope    {{ subnet.ip }}
     Skip If    not ${in_scope}
     ...    {{ subnet.ip }} is not part of this change (CHANGED_SUBNETS=${CHANGED_SUBNETS})
+    Fail If    {{ inconsistent }}    {{ misconfig_msg }}
+    Skip If    {{ internal_by_design }}    {{ internal_msg }}
     Skip If    not ${SSH_CONFIGURED}
     ...    NODE_MGMT_MAP / SWITCH_USER / credential not configured - no fabric SSH target
     @{cands}=    Create List    {{ candidates | join('    ') }}
@@ -733,10 +725,11 @@ Fabric Reach DNS From {{ tenant.name }} {{ bd.name }} Gateway {{ gw }}
     ...                Data model at render time: public={{ is_public }},
     ...                l3outs={{ l3out_list }}.
     [Tags]    fabric-icmp    d2d    shared-services
-    Skip If    {{ not externally_reachable }}    {{ fabric_skip_msg }}
     ${in_scope}=    Subnet Is In Scope    {{ subnet.ip }}
     Skip If    not ${in_scope}
     ...    {{ subnet.ip }} is not part of this change (CHANGED_SUBNETS=${CHANGED_SUBNETS})
+    Fail If    {{ inconsistent }}    {{ misconfig_msg }}
+    Skip If    {{ internal_by_design }}    {{ internal_msg }}
     Skip If    not ${SSH_CONFIGURED}
     ...    NODE_MGMT_MAP / SWITCH_USER / credential not configured - no fabric SSH target
     @{cands}=    Create List    {{ candidates | join('    ') }}
@@ -766,10 +759,11 @@ Runner Ping Gateway {{ gw }} In {{ tenant.name }} BD {{ bd.name }}
     ...                Data model at render time: public={{ is_public }},
     ...                l3outs={{ l3out_list }}.
     [Tags]    fabric-ping    l3out-north-south    icmp
-    Skip If    {{ not externally_reachable }}    {{ runner_skip_msg }}
     ${in_scope}=    Subnet Is In Scope    {{ subnet.ip }}
     Skip If    not ${in_scope}
     ...    {{ subnet.ip }} is not part of this change (CHANGED_SUBNETS=${CHANGED_SUBNETS})
+    Fail If    {{ inconsistent }}    {{ misconfig_msg }}
+    Skip If    {{ internal_by_design }}    {{ internal_msg }}
     Skip If    not ${GATEWAY_PING_ENABLED}
     ...    GATEWAY_PING_ENABLED is False for this environment
     Skip If    not ${ICMP_AVAILABLE}    ${ICMP_REASON}
