@@ -21,9 +21,9 @@ Documentation     Post-change connectivity verification for the ACI fabric.
 ...               trim_blocks=True, so a Jinja block tag inside a test BODY
 ...               swallows the newline that separates the next Robot line and
 ...               the two get joined - which silently turned '${in_scope}=' into
-...               a [Tags] value. Never put {% if %} inside a test body. Compute
-...               conditions and messages in the header and emit one
-...               unconditional line with a rendered True/False.
+...               a [Tags] value. Never put a Jinja if/endif block inside a test
+...               body. Compute conditions and messages in the header and emit
+...               one unconditional line with a rendered True/False.
 Library           Process
 Library           Collections
 Library           String
