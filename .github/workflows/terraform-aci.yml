@@ -334,9 +334,9 @@ jobs:
           # 'analyze' is the dispatch-time default.
           # On push the input is unset, and 'latest' keeps the pipeline fast -
           # a fresh analysis adds 10-15 min
-          BASELINE_STRATEGY: ${{ github.event.inputs.baseline || 'analyze' }}
+          BASELINE_STRATEGY: ${{ github.event.inputs.baseline || 'latest' }}
         run: |
-          strategy="${BASELINE_STRATEGY:analyze}"
+          strategy="${BASELINE_STRATEGY:latest}"
           echo "baseline strategy: ${strategy}"
 
           set +e
@@ -1246,7 +1246,8 @@ jobs:
           PASSED:         ${{ steps.nactest.outputs.passed }}
           FAILED:         ${{ steps.nactest.outputs.failed }}
           SKIPPED:        ${{ steps.nactest.outputs.skipped }}
-          SCOPE:          ${{ needs.plan.outputs.changed_subnets }}
+          # SCOPE:          ${{ needs.plan.outputs.changed_subnets }}
+
           PLAN_SUMMARY:   ${{ needs.plan.outputs.summary }}
           ND_CRITICAL:    ${{ needs.plan.outputs.nd_critical }}
           ND_MAJOR:       ${{ needs.plan.outputs.nd_major }}
@@ -1280,7 +1281,8 @@ jobs:
             echo ''
             echo '## Post-change operational verification (nac-test)'
             echo ''
-            echo "Fabric ICMP scope: \`${SCOPE:-all configured subnets}\`"
+            # echo "Fabric ICMP scope: \`${SCOPE:-all configured subnets}\`"
+            echo "Fabric ICMP scope: \`all subnets in plan\`"
             echo ''
 
             if [ "${FAILED:-0}" = "0" ] && [ "${TOTAL:-0}" != "0" ]; then
