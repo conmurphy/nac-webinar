@@ -913,10 +913,12 @@ jobs:
           SWITCH_USER:     ${{ secrets.SWITCH_USER }}
           SWITCH_PASSWORD: ${{ secrets.SWITCH_PASSWORD }}
           NODE_MGMT_MAP:   ${{ vars.NODE_MGMT_MAP }}
-          CHANGED_SUBNETS: ${{ needs.plan.outputs.changed_subnets }}
+          # CHANGED_SUBNETS: ${{ needs.plan.outputs.changed_subnets }}
+          CHANGED_SUBNETS: ''
           PYTHONWARNINGS:  'ignore:Unverified HTTPS request'
         run: |
-          echo "fabric ICMP scope: ${CHANGED_SUBNETS:-<full sweep>}"
+          # echo "fabric ICMP scope: ${CHANGED_SUBNETS:-<full sweep>}"
+          echo "Fabric ICMP scope: \`${SCOPE:-all configured subnets}\`"
           echo "node map         : ${NODE_MGMT_MAP:-<EMPTY - fabric tests will skip>}"
           [ -n "$SWITCH_USER" ] && echo "SWITCH_USER      : set" \
             || echo "::warning::SWITCH_USER is empty - fabric iping tests will skip"
