@@ -334,9 +334,9 @@ jobs:
           # 'analyze' is the dispatch-time default.
           # On push the input is unset, and 'latest' keeps the pipeline fast -
           # a fresh analysis adds 10-15 min
-          BASELINE_STRATEGY: ${{ github.event.inputs.baseline || 'latest' }}
+          BASELINE_STRATEGY: ${{ github.event.inputs.baseline || 'analyze' }}
         run: |
-          strategy="${BASELINE_STRATEGY:latest}"
+          strategy="${BASELINE_STRATEGY:analyze}"
           echo "baseline strategy: ${strategy}"
 
           set +e
