@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Validation Rule 401: BD name / subnet consistency
+Validation Rule 04: BD name / subnet consistency
 
 For a bridge domain named x.x.x.x_<mask>:
   1. The name must be a valid network address for that mask
@@ -29,16 +29,14 @@ def _split_name(name):
 
 
 class Rule(RuleBase):
-    id = "401"
+    id = "04"
     description = (
         "Verify BD name matches its subnet mask and gateway is the first usable host"
     )
     severity = "HIGH"
     title = "BD name / subnet mismatch"
     explanation = (
-        "Bridge domains are named after the subnet they carry. If the name and "
-        "the configured subnet disagree, DHCP scopes, route maps and firewall "
-        "policy derived from the name will silently target the wrong prefix."
+        "Bridge domains should be named after the subnet and contain a corresponding gateway"
     )
     recommendation = (
         "Rename the BD to match the subnet, or correct the subnet so its network "

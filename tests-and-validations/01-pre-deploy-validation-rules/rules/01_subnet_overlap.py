@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Validation Rule 409: global subnet overlap detection
+Validation Rule 01: global subnet overlap detection
 
 Collects every BD subnet, ESG external-subnet selector and leaked prefix across
 ALL tenants and reports any pair that overlaps. Catches the classic
@@ -22,17 +22,15 @@ OVERLAP_IGNORE = {
 
 
 class Rule(RuleBase):
-    id = "409"
-    description = "Verify no subnet overlaps across tenants"
+    id = "01"
+    description = "Verify no subnet overlaps exists within a VRF"
     severity = "HIGH"
     title = "Overlapping subnets"
     explanation = (
-        "Two tenants advertising overlapping prefixes causes non-deterministic "
-        "routing once the prefixes are leaked or advertised out a shared L3Out. "
-        "Overlap is invisible in any single tenant's config."
+        "You have duplicate subnets in the same VRF which can cause networking issues"
     )
     recommendation = (
-        "Re-allocate one of the overlapping subnets from the owning tenant's /21."
+        "Change one of the subnets to avoid a potential outage"
     )
     affected_items_label = "Overlapping prefixes"
 

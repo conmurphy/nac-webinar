@@ -19,9 +19,8 @@ class Rule(RuleBase):
     severity = "LOW"
     title = "Missing alias or description"
     explanation = (
-        "Objects are named after their subnet, which conveys addressing but not "
-        "purpose. The alias carries the human-readable intent (e.g. "
-        "'prod-cml-frontend') and is what appears in the APIC UI."
+        "Objects should be named with the subnet address and the alias should provide the human-readable intent (e.g. "
+        "'prod-mysql-database')"
     )
     recommendation = (
         'Add an alias describing the segment\'s purpose, or set it to "UNUSED" '
