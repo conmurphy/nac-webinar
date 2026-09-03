@@ -15,7 +15,7 @@ apic:
           alias: 192.168.215.64_26
           vrf: vrf-external
           subnets:
-          - ip: 198.18.215.65/26
+          - ip: 198.18.215.65/26 
         #     public: false
         #   l3outs:
         #   - l3out-to-core-01
