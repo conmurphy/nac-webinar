@@ -28,7 +28,7 @@ apic:
           description: these are for our subnets
           managed: false
           endpoint_groups: 
-            - name: 198.18.215.128_26 
+            - name: 198.18.215.128_26
               bridge_domain: 198.18.215.128_26 
               alias: app-02-web
               physical_domains:
