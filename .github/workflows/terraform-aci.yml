@@ -148,18 +148,13 @@ jobs:
           find "${WORKING_DIR}/data" -type f \( -name '*.yaml' -o -name '*.yml' \) \
             | sort | sed 's|^|  |'
 
-      # Invocation matches the form proven on the command line: the data path is
-      # POSITIONAL. -d is a nac-test flag and is rejected here.
-      #
-      # Output is captured rather than allowed to abort so the summary and PR
-      # comment are always written - a validation failure with no explanation is
-      # worse than the failure.
+      # Two passes over the same rules: text for the job log (readable, keeps
+      # the rich rule context) and JSON for the step summary. Rules are pure
+      # in-memory work, so the second pass costs nothing and means a malformed
+      # JSON writer can never hide a finding.
       - name: nac-validate
         id: validate
         run: |
-          # Schema is optional: passed only when the file exists, so a missing
-          # or renamed schema degrades to rule-only validation instead of an
-          # unhelpful CLI error.
           SCHEMA_ARG=()
           if [ -f "${NAC_VALIDATE_SCHEMA}" ]; then
             SCHEMA_ARG=(-s "${NAC_VALIDATE_SCHEMA}")
@@ -168,33 +163,44 @@ jobs:
             echo "::warning::schema not found at ${NAC_VALIDATE_SCHEMA} - running rules only"
           fi
 
+          RULE_ARGS=(-r "${NAC_VALIDATE_LOCAL_RULES}" -r "${NAC_VALIDATE_PIPELINE_RULES}")
+
           set +e
-          nac-validate \
-            "${SCHEMA_ARG[@]}" \
-            -r "${NAC_VALIDATE_LOCAL_RULES}" \
-            -r "${NAC_VALIDATE_PIPELINE_RULES}" \
+          nac-validate "${SCHEMA_ARG[@]}" "${RULE_ARGS[@]}" \
+            --no-color \
             "${WORKING_DIR}/data" \
             > validate.out 2> validate.err
           code=$?
+          nac-validate "${SCHEMA_ARG[@]}" "${RULE_ARGS[@]}" \
+            --format json \
+            "${WORKING_DIR}/data" \
+            > validate.json 2> validate-json.err
+          json_code=$?
           set -e
+
           echo "exitcode=$code" >> "$GITHUB_OUTPUT"
 
-          echo '--- nac-validate stdout ---'
+          echo '--- nac-validate (text) ---'
           cat validate.out || true
-          echo '--- nac-validate stderr ---'
           cat validate.err || true
           cat validate.out validate.err > validate-all.txt 2>/dev/null || true
 
-          # A Python exception in a rule file means that rule did not run. For a
-          # segmentation rule that is indistinguishable from a pass, so surface
-          # it explicitly.
+          if [ "$json_code" != "$code" ]; then
+            echo "::warning::text run exited ${code} but JSON run exited ${json_code} - results may be inconsistent"
+          fi
+          if ! python3 -c "import json,sys; json.load(open('validate.json'))" 2>/dev/null; then
+            echo "::warning::validate.json is not valid JSON - the summary will fall back to the raw log"
+            echo '{}' > validate.json
+          fi
+
+          # A rule that raises did not evaluate. For a segmentation rule that is
+          # indistinguishable from a pass, so surface it loudly.
           if grep -q 'Traceback (most recent call last)' validate-all.txt; then
             echo "::error::a rule raised an exception - it did NOT evaluate. Treat this as a failure, not a pass."
           fi
 
-          # Severity tallies. nac-validate reports these in its summary block as
-          #     • 3 HIGH severity violations (rules: 101, 04, 403)
-          # i.e. indented and bulleted, so a '^'-anchored grep never matches.
+          # Severity counts for downstream jobs. Every violation blocks
+          # regardless of severity; these are for reporting only.
           sev_count() {
             awk -v want="$1" '
               {
@@ -209,21 +215,48 @@ jobs:
               END { print total + 0 }
             ' validate-all.txt
           }
-
-          high=$(sev_count HIGH)
-          med=$(sev_count MEDIUM)
-          low=$(sev_count LOW)
           {
-            echo "high=${high}"
-            echo "medium=${med}"
-            echo "low=${low}"
+            echo "high=$(sev_count HIGH)"
+            echo "medium=$(sev_count MEDIUM)"
+            echo "low=$(sev_count LOW)"
           } >> "$GITHUB_OUTPUT"
-          echo "violations - HIGH:${high} MEDIUM:${med} LOW:${low} (exit ${code})"
 
-          if [ "$code" != "0" ]; then
-            echo "::error::Data model validation failed (${high} HIGH) - fix the findings before this change can be planned"
-          fi
+          case "$code" in
+            0) echo "validation passed" ;;
+            1) echo "::error::Data model validation failed - business rule violations. See the summary for the cause and fix." ;;
+            2) echo "::error::YAML syntax or schema validation failed - semantic rules did not run." ;;
+            3) echo "::error::nac-validate configuration error (missing schema or invalid rules) - NOTHING was validated." ;;
+            *) echo "::error::nac-validate exited ${code} (unexpected)" ;;
+          esac
           exit "$code"
+
+      - name: Build validation summary
+        if: always()
+        env:
+          EXITCODE: ${{ steps.validate.outputs.exitcode }}
+        run: |
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/validate_summary.py" \
+            validate.json \
+            --rules "${NAC_VALIDATE_LOCAL_RULES}" \
+            --rules "${NAC_VALIDATE_PIPELINE_RULES}" \
+            --exitcode "${EXITCODE:-1}" \
+            > validate-summary.md
+
+          cat validate-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+          # Raw output stays available but collapsed, below the styled detail.
+          if [ -s validate-all.txt ]; then
+            {
+              echo ''
+              echo '<details><summary>Raw nac-validate output</summary>'
+              echo ''
+              echo '```text'
+              head -c 40000 validate-all.txt
+              echo ''
+              echo '```'
+              echo '</details>'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Build validation summary
         if: always()
@@ -290,49 +323,49 @@ jobs:
           path: |
             validate.out
             validate.err
+            validate.json
             validate-all.txt
+            validate-summary.md
           retention-days: 5
           if-no-files-found: warn
 
       - name: Comment validation failure on PR
         if: failure() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
-        env:
-          HIGH: ${{ steps.validate.outputs.high }}
         with:
           script: |
             const fs = require('fs');
-            let out = '';
-            try { out = fs.readFileSync('validate-all.txt', 'utf8'); } catch {}
-            if (out.length > 30000) out = out.slice(0, 30000) + '\n... truncated';
+            const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return ''; } };
+
+            // The rendered summary is already markdown, so reuse it verbatim
+            // rather than maintaining a second layout.
+            let md = read('validate-summary.md');
+            if (!md.trim()) md = '```text\n' + read('validate-all.txt').slice(0, 20000) + '\n```';
+            if (md.length > 60000) md = md.slice(0, 60000) + '\n\n_... truncated, see the job summary._';
+
             const body = [
-              '## ❌ Data model validation failed',
+              md,
               '',
-              `${process.env.HIGH || '?'} HIGH severity violation(s) found by \`nac-validate\`.`,
-              'No Terraform plan was produced.',
+              '---',
               '',
-              'Reproduce locally:',
+              '**Reproduce locally**',
               '',
               '```bash',
               'nac-validate \',
+              '  -s tests-and-validations/01-pre-deploy-validation-rules/schemas/apic_schema.yaml \',
               '  -r tests-and-validations/01-pre-deploy-validation-rules/rules/local-rules \',
               '  -r tests-and-validations/01-pre-deploy-validation-rules/rules/pipeline-rules \',
               '  aci-config/data',
-              '```',
-              '',
-              '<details><summary>Findings</summary>',
-              '',
-              '```text',
-              out,
-              '```',
-              '</details>'
+              '```'
             ].join('\n');
+
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
               body
             });
+
 # ══════════════════════════════════════════════════════════
   # JOB 2 — Terraform plan
   # Only runs once validation passes.
