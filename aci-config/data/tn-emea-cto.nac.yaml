@@ -10,7 +10,7 @@ apic:
         - name: vrf-external
         # - name: vrf-external
           
-      bridge_domains:
+      # bridge_domains:
         # - name: 192.168.215.64_26
         #   alias: app-02-web
         #   vrf: vrf-external
