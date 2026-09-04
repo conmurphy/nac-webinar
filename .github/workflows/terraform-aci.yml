@@ -7,6 +7,7 @@ on:
       - 'aci-config/**'
       - 'tests-and-validations/**'
       - '.github/workflows/terraform-aci.yml'
+      - '.github/workflows/scripts/**'
   pull_request:
     branches: [main]
     paths:
