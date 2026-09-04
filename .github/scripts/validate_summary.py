@@ -272,7 +272,7 @@ def render(report, inventory, problems, exitcode):
                 f"{len(f['errors'])} violation(s)"]
         if f["title"] and f["description"]:
             out += ["", f"_{f['description']}_"]
-        out += ["", f"**{f['affected_items_label']}**", ""]
+        out += ["", f"###{f['affected_items_label']}", ""]
 
         shown = f["errors"][:MAX_FINDINGS_PER_RULE]
         for err in shown:
@@ -298,7 +298,7 @@ def render(report, inventory, problems, exitcode):
 
         fix = block(f["recommendation"])
         if fix:
-            out += ["**How to fix**", ""]
+            out += ["### How to fix", ""]
             # An indented recommendation is almost always a YAML snippet.
             if any(ln.startswith(("  ", "\t")) for ln in fix.splitlines()):
                 out += ["```yaml", fix, "```"]
