@@ -25,6 +25,7 @@ apic:
 
         - name: network-segments
           alias: network-segments
+          description: these are for our subnets
           managed: false
           endpoint_groups: 
             - name: 198.18.215.128_26
@@ -43,23 +44,25 @@ apic:
                   channel: vpc-ucs-prod-01-6454-B
                   vlan: 1230
                   deployment_immediacy: immediate
-                - node_id: 1101
-                  node2_id: 1102
-                  channel: vpc-ucs-test-01-6536-A
-                  vlan: 1230
-                  deployment_immediacy: immediate
-                - node_id: 1101
-                  node2_id: 1102
-                  channel: vpc-ucs-test-01-6536-B
-                  vlan: 1230
-                  deployment_immediacy: immediate
+                # - node_id: 1101
+                #   node2_id: 1102
+                #   channel: vpc-ucs-test-01-6536-A
+                #   vlan: 1230
+                #   deployment_immediacy: immediate
+                # - node_id: 1101
+                #   node2_id: 1102
+                #   channel: vpc-ucs-test-01-6536-B
+                #   vlan: 1230
+                #   deployment_immediacy: immediate
 
         - name: security-groups
           alias: security-groups
+          description: these are for our security groups
           managed: false
           endpoint_security_groups:
             - name: all-services
               vrf: vrf-external
+              description: all-services
               epg_selectors:
                 - endpoint_group: 198.18.215.128_26 
                   application_profile: network-segments
