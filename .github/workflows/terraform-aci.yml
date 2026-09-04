@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - 'aci-config/**'
+      - 'tests-and-validations/**'
       - '.github/workflows/terraform-aci.yml'
   pull_request:
     branches: [main]
     paths:
       - 'aci-config/**'
+      - 'tests-and-validations/**'
   workflow_dispatch:
     inputs:
       action:
@@ -18,12 +20,6 @@ on:
         default: 'plan'
         type: choice
         options: [plan, apply]
-      baseline:
-        description: 'ND baseline: latest is instant using the latest snapshot, analyze runs a new analysis job (10 - 15 minutes)'
-        required: true
-        default: 'analyze'
-        type: choice
-        options: [latest, analyze]
 
 concurrency:
   group: terraform-aci
@@ -38,19 +34,18 @@ env:
   TF_STATE_SCHEMA: aci_nac
   TF_DATA_DIR: /home/runner/_work/_tfdata/aci-config
   TF_PLUGIN_CACHE_DIR: /home/runner/_work/_tfcache
-  # ---- Nexus Dashboard ----
-  # ND is reached by IP, so the cert SAN cannot match. Verification off.
-  ND_VERIFY_SSL: 'false'
-  # This cluster advertises LDAP and local; the CLI default DefaultAuth 401s.
-  ND_DOMAIN: local
-  # Pre-change gate. 'critical,major' makes ND block the apply on exit 3.
-  ND_FAIL_ON: 'critical,major' # ''
-  # Post-change delta reports the same severities but never blocks (step exits 0).
-  ND_DELTA_FAIL_ON: 'critical,major' #''
-  ND_JOB_TIMEOUT_MINUTES: '30'
-  ND_POLL_INTERVAL: '15'
-  # Fallback only. The real link is read from the report's prechange_ui_url.
-  ND_PRECHANGE_UI_PATH: '/analysis-hub/pre-change-analysis'
+   # ---- nac-validate ----
+  # Two tiers. local-rules is what the pre-commit hook runs on a laptop:
+  # self-consistency checks with a zero false-positive budget. pipeline-rules
+  # adds organisational policy (allocations, segmentation, metadata,
+  # referential integrity).
+  #
+  # The pipeline runs BOTH. Passing only pipeline-rules would silently stop
+  # gating prod on every local-tier rule.
+  NAC_VALIDATE_DIR: tests-and-validations/01-pre-deploy-validation-rules
+  NAC_VALIDATE_LOCAL_RULES: tests-and-validations/01-pre-deploy-validation-rules/local-rules
+  NAC_VALIDATE_PIPELINE_RULES: tests-and-validations/01-pre-deploy-validation-rules/pipeline-rules
+  NAC_VALIDATE_SCHEMA: tests-and-validations/01-pre-deploy-validation-rules/schemas/apic_schema.yaml
   # ---- nac-test ----
   NAC_TEST_DIR: tests-and-validations/02-post-deploy-tests
   NAC_TEST_TEMPLATES: tests-and-validations/02-post-deploy-tests/tests/templates
@@ -60,9 +55,6 @@ env:
   # HOME can resolve to '/', producing "Could not create directory '/.ssh'".
   HOME: /home/runner
 
-# Default for the whole workflow. Each job narrows or widens as needed:
-#   plan  - adds pull-requests: write for the PR comment
-#   apply - adds contents: write so gh-pages can be pushed
 permissions:
   contents: read
 
@@ -92,49 +84,199 @@ jobs:
         run: |
           pipx install zizmor
           zizmor --min-severity=high .github/workflows/
+
   # ══════════════════════════════════════════════════════════
-  # JOB 1 — Plan + Nexus Dashboard pre-change analysis
-  # Any branch or PR. No approval required.
+  # JOB 1 — Validate data model (fast gate, no fabric access)
+  #
+  # Runs the SAME rules as the local pre-commit hook, plus the repo-wide rules
+  # that need every file at once (subnet uniqueness, overlap, referential
+  # integrity). Deliberately has no APIC or ND credentials: this job answers
+  # "is the intent correct?", not "what will change?".
+  # ══════════════════════════════════════════════════════════
+  validate:
+    name: Validate data model
+    runs-on: [self-hosted, openshift, aci]
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      exitcode: ${{ steps.validate.outputs.exitcode }}
+      errors:   ${{ steps.validate.outputs.errors }}
+      warnings: ${{ steps.validate.outputs.warnings }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify tools
+        run: |
+          nac-validate --version || true
+          python3 --version
+          echo "rules:"
+          ls -1 "${NAC_VALIDATE_RULES}"/rule_*.py | sed 's|.*/|  |'
+
+      - name: Show data model files
+        run: |
+          find "${WORKING_DIR}/data" -type f \( -name '*.yaml' -o -name '*.yml' \) \
+            | sort | sed 's|^|  |'
+
+      # nac-validate exits non-zero on any HIGH/ERROR result. Captured rather
+      # than allowed to abort so the summary and PR comment are always written
+      - name: nac-validate
+        id: validate
+        run: |
+          echo "local rules:"
+          ls -1 "${NAC_VALIDATE_LOCAL_RULES}"/*.py | sed 's|.*/|  |'
+          echo "pipeline rules:"
+          ls -1 "${NAC_VALIDATE_PIPELINE_RULES}"/*.py | sed 's|.*/|  |'
+
+          set +e
+          nac-validate \
+            -d "${WORKING_DIR}/data" \
+            -s "${NAC_VALIDATE_SCHEMA}" \
+            -r "${NAC_VALIDATE_LOCAL_RULES}" \
+            -r "${NAC_VALIDATE_PIPELINE_RULES}" \
+            --non-strict \
+            > validate.out 2> validate.err
+          code=$?
+          set -e
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+
+          echo '--- nac-validate stdout ---'
+          cat validate.out || true
+          echo '--- nac-validate stderr ---'
+          cat validate.err || true
+
+          cat validate.out validate.err > validate-all.txt 2>/dev/null || true
+
+          errs=$(grep -c -iE '^(ERROR|HIGH)' validate-all.txt || true)
+          warns=$(grep -c -iE '^(WARNING|MEDIUM|LOW)' validate-all.txt || true)
+          echo "errors=${errs:-0}"    >> "$GITHUB_OUTPUT"
+          echo "warnings=${warns:-0}" >> "$GITHUB_OUTPUT"
+          echo "validation: ${errs:-0} error(s), ${warns:-0} warning(s), exit ${code}"
+
+          if [ "$code" != "0" ]; then
+            echo "::error::Data model validation failed - fix the findings before this change can be planned"
+          fi
+          exit "$code"
+
+      - name: Build validation summary
+        if: always()
+        env:
+          EXITCODE: ${{ steps.validate.outputs.exitcode }}
+          ERRORS:   ${{ steps.validate.outputs.errors }}
+          WARNINGS: ${{ steps.validate.outputs.warnings }}
+        run: |
+          set -uo pipefail
+          {
+            echo '# 1. Data model validation (nac-validate)'
+            echo ''
+            if [ "${EXITCODE:-1}" = "0" ]; then
+              echo "✅ **Data model is valid.** ${WARNINGS:-0} advisory warning(s)."
+            else
+              echo "❌ **${ERRORS:-0} error(s) found.** The plan will not run until these are fixed."
+            fi
+            echo ''
+            echo 'Checks applied:'
+            printf '%s\n' \
+              '- Subnets inside each tenant allocated range' \
+              '- BD name matches the subnet it carries' \
+              '- EPG naming convention' \
+              '- Static paths restricted to permitted UCS domains (prod only)' \
+              '- Every EPG has a static path' \
+              '- No duplicate or overlapping subnets anywhere in the repo' \
+              '- Cross-references resolve (BD to VRF, BD to L3Out, EPG to BD, contracts)' \
+              '- VRF enforcement and contract scope' \
+              '- Descriptions and aliases (advisory)'
+            echo ''
+            if [ -s validate-all.txt ]; then
+              echo '<details><summary>Full validation output</summary>'
+              echo ''
+              echo '```text'
+              head -c 40000 validate-all.txt
+              echo ''
+              echo '```'
+              echo '</details>'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload validation output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nac-validate
+          path: |
+            validate.out
+            validate.err
+            validate-all.txt
+          retention-days: 5
+          if-no-files-found: warn
+
+      - name: Comment validation failure on PR
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          ERRORS: ${{ steps.validate.outputs.errors }}
+        with:
+          script: |
+            const fs = require('fs');
+            let out = '';
+            try { out = fs.readFileSync('validate-all.txt', 'utf8'); } catch {}
+            if (out.length > 30000) out = out.slice(0, 30000) + '\n... truncated';
+            const body = [
+              '## ❌ Data model validation failed',
+              '',
+              `${process.env.ERRORS || '?'} error(s) found by \`nac-validate\`.`,
+              'No Terraform plan was produced.',
+              '',
+              'Reproduce locally:',
+              '',
+              '```bash',
+              'nac-validate \',
+              '  -d aci-config/data \',
+              '  -s tests-and-validations/01-pre-deploy-validation-rules/schemas/apic_schema.yaml \',
+              '  -r tests-and-validations/01-pre-deploy-validation-rules/local-rules \',
+              '  -r tests-and-validations/01-pre-deploy-validation-rules/pipeline-rules',
+              '```',
+              '',
+              '<details><summary>Findings</summary>',
+              '',
+              '```text',
+              out,
+              '```',
+              '</details>'
+            ].join('\n');
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+# ══════════════════════════════════════════════════════════
+  # JOB 2 — Terraform plan
+  # Only runs once validation passes.
   # ══════════════════════════════════════════════════════════
   plan:
-    name: Validate & Plan
+    name: Terraform Plan
+    needs: validate
     runs-on: [self-hosted, openshift, aci]
     environment: aci-tenant-emea-cto-plan
-    # pull-requests: write is required by the "Comment on PR" step. contents
-    # stays read - only the apply job pushes to gh-pages.
     permissions:
       contents: read
       pull-requests: write
     defaults:
       run:
         working-directory: ${{ env.WORKING_DIR }}
-    # ND connection settings for every step in this job.
-    # host/fabric are repository VARIABLES; user/password are environment SECRETS.
-    env:
-      ND_HOST:     ${{ vars.ND_HOST }}
-      ND_FABRIC:   ${{ vars.ND_FABRIC }}
-      ND_USER:     ${{ secrets.ND_USER }}
-      ND_PASSWORD: ${{ secrets.ND_PASSWORD }}
     outputs:
       exitcode:        ${{ steps.plan.outputs.exitcode }}
       summary:         ${{ steps.summary.outputs.line }}
-      nd_snapshot:     ${{ steps.baseline.outputs.snapshot_id }}
-      nd_exitcode:     ${{ steps.prechange.outputs.exitcode }}
-      nd_job_id:       ${{ steps.prechange.outputs.job_id }}
-      nd_critical:     ${{ steps.prechange.outputs.critical }}
-      nd_major:        ${{ steps.prechange.outputs.major }}
-      nd_minor:        ${{ steps.prechange.outputs.minor }}
-      nd_warning:      ${{ steps.prechange.outputs.warning }}
-      nd_ui_url:       ${{ steps.ndcontext.outputs.ui_url }}
       changed_subnets: ${{ steps.changed.outputs.subnets }}
       changed_bds:     ${{ steps.changed.outputs.bds }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # Nothing here pushes via the checkout credentials - the gh-pages
-          # deploy uses its own github_token input. Self-hosted runners keep
-          # the workspace, so don't leave a token in .git/config.
           persist-credentials: false
 
       - name: Prepare cache dirs
@@ -146,20 +288,10 @@ jobs:
             echo "module cache: COLD - first init will be slow"
           fi
 
-      - name: Verify tools and ND settings
+      - name: Verify tools
         run: |
           terraform version
-          nac-analytics version
           jq --version
-          echo "ND_HOST   : ${ND_HOST:-<EMPTY>}"
-          echo "ND_FABRIC : ${ND_FABRIC:-<EMPTY>}"
-          [ -n "$ND_USER" ]     && echo "ND_USER   : set"     || echo "ND_USER   : <EMPTY>"
-          [ -n "$ND_PASSWORD" ] && echo "ND_PASSWORD: set"    || echo "ND_PASSWORD: <EMPTY>"
-
-      - name: Show NaC data files
-        run: |
-          echo "cwd: $(pwd)"
-          find data -type f \( -name '*.yaml' -o -name '*.yml' \) | sort
 
       - name: Init
         run: |
@@ -298,341 +430,19 @@ jobs:
           echo '--- changed-subnets.tsv ---'
           cat changed-subnets.tsv || true
 
-      - name: Prepare ND payload
-        id: ndpayload
-        if: steps.plan.outputs.exitcode == '2'
-        run: |
-          # Formatting the plan correctly
-          # ND wants double brackets; the plan produced single.
-          #  Rn 'rsnodeL3OutAtt-[topology/pod-1/node-1101]' does not match expected
-          #  rn 'rsnodeL3OutAtt-[[topology/pod-1/node-1101]]'
-          # going to drop it so the test passes for the demo
-          DROP='["l3extRsNodeL3OutAtt","l3extLNodeP","l3extLIfP","l3extRsPathL3OutAtt","l3extMember","l3extIp","bgpPeerP","bgpAsP","bgpLocalAsnP"]'
-          jq -c --argjson drop "$DROP" '
-            .resource_changes |= map(
-              select(
-                ((.change.after.class_name // .change.before.class_name // "")
-                 | IN($drop[])) | not
-              )
-            )
-          ' plan.json > plan-nd.json
-
-          before=$(jq '.resource_changes | length' plan.json)
-          after=$(jq '.resource_changes | length' plan-nd.json)
-          echo "resource_changes: ${before} -> ${after} (filtered $((before-after)))"
-          echo "filtered=$((before-after))" >> "$GITHUB_OUTPUT"
-
-      # ─────────────── Nexus Dashboard ───────────────
-      - name: ND doctor
-        if: steps.plan.outputs.exitcode == '2'
-        run: nac-analytics nd doctor --output text
-
-      - name: Pin ND baseline snapshot
-        id: baseline
-        if: steps.plan.outputs.exitcode == '2'
-        env:
-          # 'analyze' is the dispatch-time default.
-          # On push the input is unset, and 'latest' keeps the pipeline fast -
-          # a fresh analysis adds 10-15 min
-          BASELINE_STRATEGY: ${{ github.event.inputs.baseline || 'latest' }}
-        run: |
-          strategy="${BASELINE_STRATEGY:latest}"
-          echo "baseline strategy: ${strategy}"
-
-          set +e
-          if [ "$strategy" = "analyze" ]; then
-            nac-analytics nd analyze --output text > snap.out 2> snap.err
-          else
-            nac-analytics nd snapshots latest --output text > snap.out 2> snap.err
-          fi
-          rc=$?
-          set -e
-
-          echo "--- CLI diagnostics (stderr) ---"
-          grep -v -e "TLS certificate verification is disabled" \
-                  -e "more 'online' snapshot(s) exist" \
-                  snap.err || true
-          echo "--------------------------------"
-
-          # The snapshot ID is the ONLY thing on stdout.
-          # Do NOT read stderr - it carries the analysis JOB id, a different
-          # identifier that prechange/delta reject.
-          snap="$(tail -n1 snap.out | tr -d '[:space:]')"
-
-          if [ -z "$snap" ]; then
-            echo "::warning::No baseline snapshot resolved (rc=${rc}); prechange will use 'latest'"
-          fi
-          echo "snapshot_id=${snap}" >> "$GITHUB_OUTPUT"
-          echo "baseline snapshot: ${snap:-<none>}"
-
-      - name: ND pre-change analysis
-        id: prechange
-        if: steps.plan.outputs.exitcode == '2'
-        env:
-          BASELINE_SNAP: ${{ steps.baseline.outputs.snapshot_id }}
-        run: |
-          BASELINE="${BASELINE_SNAP:-}"
-          [ -n "$BASELINE" ] || BASELINE="latest"
-          echo "analysing plan-nd.json against baseline: ${BASELINE}"
-
-          # NOTE: --report-file applies to JUnit output only.
-          # With --output markdown the report goes to STDOUT.
-          set +e
-          nac-analytics nd prechange plan-nd.json "$BASELINE" \
-            --fail-on "${ND_FAIL_ON}" \
-            --detail full \
-            --output markdown \
-            > prechange.raw 2> prechange.err
-          code=$?
-          set -e
-
-          echo "--- CLI diagnostics (stderr) ---"
-          cat prechange.err || true
-          echo "--------------------------------"
-          cat prechange.raw || true
-
-          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
-
-          # Trim any preamble before the first markdown heading
-          sed -n '/^# /,$p' prechange.raw > nd-prechange.md || true
-          [ -s nd-prechange.md ] || \
-            echo "_No Nexus Dashboard pre-change report produced (exit ${code})._" > nd-prechange.md
-
-          # Read the per-severity counts from the "New anomalies" table only
-          sev_count() {
-            awk -v sev="$1" '
-              /^## New anomalies/ { inblock=1; next }
-              inblock && /^## /   { exit }
-              inblock {
-                n = split($0, f, "|")
-                if (n >= 3) {
-                  gsub(/^ +| +$/, "", f[2]); gsub(/^ +| +$/, "", f[3])
-                  if (f[2] == sev) { print f[3]; exit }
-                }
-              }
-            ' nd-prechange.md
-          }
-
-          crit="$(sev_count critical)"; maj="$(sev_count major)"
-          min="$(sev_count minor)";    warn="$(sev_count warning)"
-          {
-            echo "critical=${crit:-0}"
-            echo "major=${maj:-0}"
-            echo "minor=${min:-0}"
-            echo "warning=${warn:-0}"
-          } >> "$GITHUB_OUTPUT"
-          echo "new anomalies - critical:${crit:-0} major:${maj:-0} minor:${min:-0} warning:${warn:-0}"
-
-          job_id="$(awk -F'|' '$2 ~ /^ *job_id *$/ {gsub(/^ +| +$/,"",$3); print $3; exit}' nd-prechange.md)"
-          {
-            echo "job_id=${job_id}"
-            echo "gate_ran=true"
-          } >> "$GITHUB_OUTPUT"
-          echo "job_id: ${job_id:-<none>}"
-
-          case "$code" in
-            0) echo "ND: no new anomalies at or above ${ND_FAIL_ON}" ;;
-            2) echo "::warning::ND analysis job failed, stopped, or timed out" ;;
-            3) echo "::error::ND predicts new ${ND_FAIL_ON} anomalies - blocking apply"
-               exit 1 ;;
-            4) echo "::warning::ND rejected the configuration (possible bad input) - the pre-change analysis did NOT finish for this change so review the plan manually before approving."
-               echo "gate_ran=false" >> "$GITHUB_OUTPUT" ;;
-            5) echo "::error::ND authentication or authorisation failure"
-               exit 1 ;;
-            *) echo "::error::ND unexpected error (exit $code)"
-               exit 1 ;;
-          esac
-          exit 0
-
-      # ─────────── JSON fetch + filtered anomaly table ───────────
-      # Re-reads the SAME completed job via --job-id. Nothing is re-analysed.
-      - name: ND anomaly context table
-        id: ndcontext
-        if: always() && steps.prechange.outputs.job_id != ''
-        continue-on-error: true
-        env:
-          WANT_JOB_ID: ${{ steps.prechange.outputs.job_id }}
-        run: |
-          WANT_JOB="${WANT_JOB_ID}"
-
-          set +e
-          nac-analytics nd prechange \
-            --job-id "${WANT_JOB}" \
-            --fail-on none \
-            --output json \
-            > nd-prechange.json 2> ndjson.err
-          rc=$?
-          set -e
-          echo "json fetch rc=${rc}"
-          grep -v -e "TLS certificate verification is disabled" \
-                  -e "more 'online' snapshot(s) exist" \
-                  ndjson.err || true
-
-          fallback() {
-            echo "_$1_" > nd-anomalies.md
-            echo "::warning::anomaly context skipped - $1"
-            exit 0
-          }
-
-          [ -s nd-prechange.json ] || fallback "the CLI produced no JSON output"
-
-          # Guard against the malformed-JSON writer bug.
-          if ! jq empty nd-prechange.json 2> jq-err.txt; then
-            head -3 jq-err.txt || true
-            fallback "the CLI emitted invalid JSON"
-          fi
-
-          # Confirm we re-read the gate's job rather than submitting a new one.
-          GOT_JOB="$(jq -r '.details.job_id // empty' nd-prechange.json)"
-          echo "gate job_id : ${WANT_JOB}"
-          echo "json job_id : ${GOT_JOB:-<none>}"
-          if [ -n "$GOT_JOB" ] && [ "$GOT_JOB" != "$WANT_JOB" ]; then
-            echo "::warning::JSON fetch returned job ${GOT_JOB}, not the gate's ${WANT_JOB} - --job-id may be submitting a NEW analysis"
-          fi
-
-          ui="$(jq -r '.details.prechange_ui_url // empty' nd-prechange.json)"
-          echo "ui_url=${ui}" >> "$GITHUB_OUTPUT"
-          echo "ui_url: ${ui:-<none>}"
-
-          # Signal filter.
-          #
-          # NO TIMESTAMP CUTOFF. Compliance violations carry the epoch of rule
-          # import, not of submission, so a time filter would drop the very
-          # anomalies that block the gate. Filtering on anomalySource is also
-          # unsafe: compliance and traffic noise both report "telemetry". We
-          # filter on cleared / type / acknowledged only, and label the result
-          # as context rather than delta.
-          #
-          # No backslash escapes in this program on purpose - they do not
-          # survive copy/paste reliably. The markdown pipe escape arrives via
-          # --arg so jq never parses it.
-          set +e
-          jq -r --arg pipe '\|' '
-            def rank: {"critical":0,"major":1,"minor":2,"warning":3}[.] // 9;
-            def esc: tostring | gsub("[|]"; $pipe) | gsub("[\n\r]+"; " ");
-
-            (.delta_detail.anomalies.data.anomalies // []) as $all
-            | ($all | length) as $total
-            | ($all | map(select((.cleared // false) == true)) | length) as $cleared
-            | ($all | map(select(.anomalyType == "TRAFFIC_ANALYTICS")) | length) as $traffic
-            | ($all | map(select((.acknowledged // false) == true)) | length) as $acked
-            | ($all
-                | map(select((.cleared // false) == false))
-                | map(select(.anomalyType != "TRAFFIC_ANALYTICS"))
-                | map(select((.acknowledged // false) == false))
-                | sort_by(.severity | rank)
-              ) as $sig
-            | if $total == 0 then
-                "_No anomaly detail returned by this endpoint._"
-              else
-                ( if ($sig | length) == 0 then
-                    "_No active, unacknowledged, non-telemetry anomalies._"
-                  else
-                    "| severity | category | rule / entity | detail |",
-                    "| --- | --- | --- | --- |",
-                    ( $sig[] |
-                      "| \(.severity | esc) | \(.category | esc) | \(
-                         if (.ruleName // "") != "" then (.ruleName | esc)
-                         elif (.entityName // "") != "" then (.entityName | esc)
-                         else "-" end
-                       ) | \(.anomalyString | esc) |"
-                    )
-                  end )
-              end
-          ' nd-prechange.json > nd-anomalies.md
-          jqrc=$?
-          set -e
-          if [ "$jqrc" != "0" ] || [ ! -s nd-anomalies.md ]; then
-            fallback "the anomaly filter failed (jq exit ${jqrc})"
-          fi
-
-          cat nd-anomalies.md
-          exit 0
-
-      - name: Tidy ND report
-        id: ndclean
-        if: always()
-        run: |
-          # nd-prechange.md only exists when plan exitcode was 2 AND the
-          # prechange step ran. On a no-change or failed-plan run it is absent,
-          # and an unguarded python invocation fails the whole job.
-          if [ ! -s nd-prechange.md ]; then
-            echo "no ND report to tidy - prechange did not run"
-            : > nd-prechange-clean.md
-            : > nd-violations.md
-            exit 0
-          fi
-          python3 "${GITHUB_WORKSPACE}/.github/scripts/nd_report_clean.py" \
-            nd-prechange.md \
-            --clean-out nd-prechange-clean.md \
-            --violations-out nd-violations.md
-          echo '--- violations ---'
-          cat nd-violations.md
-
-      # Fetch the SAME completed analysis as JUnit for archival.
-      # --job-id means ND does not re-run anything.
-      - name: ND JUnit report
-        if: always() && steps.prechange.outputs.job_id != ''
-        continue-on-error: true
-        env:
-          ND_JOB_ID: ${{ steps.prechange.outputs.job_id }}
-        run: |
-          nac-analytics nd prechange \
-            --job-id "${ND_JOB_ID}" \
-            --fail-on none \
-            --output junit \
-            --report-file prechange-report.xml
-      
-      # ───── Summary: ND first, Terraform second ─────
       - name: Build step summary
         if: always()
         shell: bash
         env:
-          PLAN_LINE:      ${{ steps.summary.outputs.line }}
-          PLAN_EXITCODE:  ${{ steps.plan.outputs.exitcode }}
-          BASELINE_SNAP:  ${{ steps.baseline.outputs.snapshot_id }}
-          ND_UI_URL:      ${{ steps.ndcontext.outputs.ui_url }}
-          ND_UI_BASE:     ${{ vars.ND_HOST }}
-          SCOPE:          ${{ steps.changed.outputs.subnets }}
+          PLAN_LINE:     ${{ steps.summary.outputs.line }}
+          PLAN_EXITCODE: ${{ steps.plan.outputs.exitcode }}
+          SCOPE:         ${{ steps.changed.outputs.subnets }}
         run: |
           set -uo pipefail
-
-          ND_LINK="${ND_UI_URL:-}"
-          if [ -z "$ND_LINK" ] && [ -n "${ND_UI_BASE:-}" ]; then
-            ND_LINK="${ND_UI_BASE%/}${ND_PRECHANGE_UI_PATH:-/analysis-hub/pre-change-analysis}"
-          fi
-
           {
-            echo '# ACI Change Analysis'
+            echo '# 2. Terraform plan'
             echo ''
             echo "**Plan:** ${PLAN_LINE:-unknown}"
-            echo ''
-
-            if [ -s nd-prechange.md ]; then
-              echo '## 1. Nexus Dashboard pre-change analysis'
-              echo ''
-              echo "Baseline snapshot: \`${BASELINE_SNAP:-latest}\`"
-              echo ''
-              [ -n "$ND_LINK" ] && echo "🔗 [Nexus Dashboard pre-change analysis hub](${ND_LINK})" && echo ''
-
-              if [ -s nd-anomalies.md ]; then
-                echo '### Fabric anomaly context'
-                echo ''
-                cat nd-anomalies.md
-                echo ''
-              fi
-
-              echo '<details><summary>Full Nexus Dashboard report</summary>'
-              echo ''
-              cat nd-prechange-clean.md 2>/dev/null || cat nd-prechange.md
-              echo ''
-              echo '</details>'
-              echo ''
-              echo '---'
-              echo ''
-            fi
-
-            echo '## 2. Terraform plan'
             echo ''
             case "${PLAN_EXITCODE:-}" in
               2) echo '⚠️ Changes detected - **Apply to APIC** is waiting for approval.' ;;
@@ -642,7 +452,7 @@ jobs:
             echo ''
             cat plan-summary.md 2>/dev/null || echo '_No summary._'
             echo ''
-            echo "**Fabric ICMP test scope:** \`${SCOPE:-all configured subnets (full sweep)}\`"
+            echo "**Post-deploy test scope:** \`${SCOPE:-all configured subnets (full sweep)}\`"
             echo ''
             echo '<details><summary>Raw terraform plan output</summary>'
             echo ''
@@ -664,12 +474,6 @@ jobs:
             ${{ env.WORKING_DIR }}/plan.json
             ${{ env.WORKING_DIR }}/plan-summary.md
             ${{ env.WORKING_DIR }}/changed-subnets.tsv
-            ${{ env.WORKING_DIR }}/nd-prechange.md
-            ${{ env.WORKING_DIR }}/nd-prechange-clean.md
-            ${{ env.WORKING_DIR }}/nd-prechange.json
-            ${{ env.WORKING_DIR }}/nd-anomalies.md
-            ${{ env.WORKING_DIR }}/nd-violations.md
-            ${{ env.WORKING_DIR }}/prechange-report.xml
           retention-days: 5
           if-no-files-found: warn
 
@@ -677,12 +481,6 @@ jobs:
         if: always() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         env:
-          ND_HOST:      ${{ vars.ND_HOST }}
-          ND_FABRIC:    ${{ vars.ND_FABRIC }}
-          ND_JOB_ID:    ${{ steps.prechange.outputs.job_id }}
-          ND_UI_URL:    ${{ steps.ndcontext.outputs.ui_url }}
-          ND_CRITICAL:  ${{ steps.prechange.outputs.critical }}
-          ND_MAJOR:     ${{ steps.prechange.outputs.major }}
           PLAN_SUMMARY: ${{ steps.summary.outputs.line }}
           TEST_SCOPE:   ${{ steps.changed.outputs.subnets }}
         with:
@@ -693,77 +491,21 @@ jobs:
               try { return fs.readFileSync(`${dir}/${f}`, 'utf8'); }
               catch { return fallback; }
             };
-
-            let nd = read('nd-prechange-clean.md', read('nd-prechange.md', '_No ND report._'));
             let plan = read('tfplan.txt', '_No plan output._');
-            const anomalies = read('nd-anomalies.md', '');
-            const caveats   = read('nd-compliance-warnings.md', '');
-            if (nd.length   > 30000) nd   = nd.slice(0, 30000)   + '\n... truncated';
+            const table = read('plan-summary.md', '');
             if (plan.length > 30000) plan = plan.slice(0, 30000) + '\n... truncated';
 
-            const crit    = process.env.ND_CRITICAL || '0';
-            const maj     = process.env.ND_MAJOR    || '0';
-            const host    = process.env.ND_HOST     || '';
-            const uiUrl   = process.env.ND_UI_URL   || '';
-            const planSum = process.env.PLAN_SUMMARY || 'unknown';
-            const scope   = process.env.TEST_SCOPE || 'all configured subnets (full sweep)';
-
-            const verdict = (crit === '0' && maj === '0')
-              ? '✅ No new critical or major anomalies predicted.'
-              : `⚠️ Predicted to introduce ${crit} critical and ${maj} major anomalies.`;
-
-            // Prefer the URL the report itself reports; the hand-built path
-            // does not match this ND build.
-            const ndLink = uiUrl
-              ? `🔗 [View this analysis in Nexus Dashboard](${uiUrl})`
-              : (host ? `🔗 [Nexus Dashboard analysis hub](${host})` : '');
-
             const body = [
-              '## ACI Change Analysis',
+              '## ACI change plan',
               '',
-              '`' + planSum + '`',
+              '✅ Data model validation passed.',
               '',
-              '### 1. Nexus Dashboard pre-change',
+              '`' + (process.env.PLAN_SUMMARY || 'unknown') + '`',
               '',
-              verdict,
-            ];
-
-            if (ndLink) body.push('', ndLink);
-
-            body.push(
+              table.trim(),
               '',
-              '| severity | new |',
-              '| --- | --- |',
-              `| critical | ${crit} |`,
-              `| major | ${maj} |`
-            );
-
-            if (caveats.trim()) {
-              body.push('', '#### Compliance reporting caveats', '', caveats.trim());
-            }
-
-            if (anomalies.trim()) {
-              body.push(
-                '',
-                '<details><summary>Fabric anomaly context (filtered)</summary>',
-                '',
-                anomalies.trim(),
-                '',
-                '</details>'
-              );
-            }
-
-            body.push(
-              '',
-              '<details><summary>Full ND report</summary>',
-              '',
-              nd,
-              '',
-              '</details>',
-              '',
-              '### 2. Terraform plan',
-              '',
-              '**Fabric ICMP test scope:** `' + scope + '`',
+              '**Post-deploy test scope:** `' +
+                (process.env.TEST_SCOPE || 'all configured subnets (full sweep)') + '`',
               '',
               '<details><summary>Show plan</summary>',
               '',
@@ -771,21 +513,21 @@ jobs:
               plan,
               '```',
               '</details>'
-            );
+            ].join('\n');
 
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: body.join('\n')
+              body
             });
-  # ══════════════════════════════════════════════════════════
-  # JOB 2 — Apply + post-change verification
+# ══════════════════════════════════════════════════════════
+  # JOB 3 — Apply + post-change verification
   # main only, blocks on required reviewers.
   # ══════════════════════════════════════════════════════════
   apply:
     name: Apply to APIC
-    needs: plan
+    needs: [validate, plan]
     if: |
       needs.plan.outputs.exitcode == '2' &&
       github.ref == 'refs/heads/main' &&
@@ -801,52 +543,31 @@ jobs:
     defaults:
       run:
         working-directory: ${{ env.WORKING_DIR }}
-    # ND_USER / ND_PASSWORD must exist on the aci-tenant-emea-cto environment,
-    # not only on the -plan environment.
-    env:
-      ND_HOST:     ${{ vars.ND_HOST }}
-      ND_FABRIC:   ${{ vars.ND_FABRIC }}
-      ND_USER:     ${{ secrets.ND_USER }}
-      ND_PASSWORD: ${{ secrets.ND_PASSWORD }}
     steps:
       - name: Approval context
         env:
-          PLAN_SUMMARY: ${{ needs.plan.outputs.summary }}
-          ND_SNAPSHOT:  ${{ needs.plan.outputs.nd_snapshot }}
-          ND_EXITCODE:  ${{ needs.plan.outputs.nd_exitcode }}
-          ND_CRITICAL:  ${{ needs.plan.outputs.nd_critical }}
-          ND_MAJOR:     ${{ needs.plan.outputs.nd_major }}
-          SCOPE:        ${{ needs.plan.outputs.changed_subnets }}
-          COMMIT_SHA:   ${{ github.sha }}
-          TRIGGERED_BY: ${{ github.actor }}
+          PLAN_SUMMARY:  ${{ needs.plan.outputs.summary }}
+          VAL_WARNINGS:  ${{ needs.validate.outputs.warnings }}
+          SCOPE:         ${{ needs.plan.outputs.changed_subnets }}
+          COMMIT_SHA:    ${{ github.sha }}
+          TRIGGERED_BY:  ${{ github.actor }}
         run: |
-          echo "Approved plan    : ${PLAN_SUMMARY:-unknown}"
-          echo "ND baseline      : ${ND_SNAPSHOT:-<none>}"
-          echo "ND prechange     : exit ${ND_EXITCODE:-<n/a>}"
-          echo "ND anomalies     : ${ND_CRITICAL:-0} critical, ${ND_MAJOR:-0} major"
-          echo "Fabric ICMP scope: ${SCOPE:-full sweep}"
-          echo "Commit           : ${COMMIT_SHA}"
-          echo "Triggered by     : ${TRIGGERED_BY}"
+          echo "Approved plan     : ${PLAN_SUMMARY:-unknown}"
+          echo "Validation        : passed (${VAL_WARNINGS:-0} advisory warnings)"
+          echo "Post-deploy scope : ${SCOPE:-full sweep}"
+          echo "Commit            : ${COMMIT_SHA}"
+          echo "Triggered by      : ${TRIGGERED_BY}"
 
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # Nothing here pushes via the checkout credentials - the gh-pages
-          # deploy uses its own github_token input. Self-hosted runners keep
-          # the workspace, so don't leave a token in .git/config.
           persist-credentials: false
 
       - name: Prepare cache dirs
         run: mkdir -p "$TF_PLUGIN_CACHE_DIR" "$TF_DATA_DIR"
 
-      - name: Verify tools and ND settings
-        run: |
-          terraform version
-          nac-analytics version
-          echo "ND_HOST   : ${ND_HOST:-<EMPTY>}"
-          echo "ND_FABRIC : ${ND_FABRIC:-<EMPTY>}"
-          [ -n "$ND_USER" ]     && echo "ND_USER   : set"  || echo "::warning::ND_USER is EMPTY - add it to the aci-tenant-emea-cto environment"
-          [ -n "$ND_PASSWORD" ] && echo "ND_PASSWORD: set" || echo "::warning::ND_PASSWORD is EMPTY - add it to the aci-tenant-emea-cto environment"
+      - name: Verify tools
+        run: terraform version
 
       # The connectivity suite needs SSHLibrary (which pulls paramiko) and dig.
       # Probe the interpreter that actually runs Robot, not system python3 - they
@@ -890,6 +611,29 @@ jobs:
           ACI_PASSWORD: ${{ secrets.APIC_PASSWORD }}
           ACI_INSECURE: 'true'
 
+      # ═══════════════ Post-apply: re-validate against reality ═══════════════
+      # Cheap and catches the case where the apply partially succeeded: the YAML
+      # is still valid, so any failure here means the data model changed between
+      # plan and apply rather than the model being wrong.
+      - name: nac-validate (post-apply intent re-check)
+        continue-on-error: true
+        working-directory: .
+        run: |
+          set +e
+          nac-validate \
+            -d "${WORKING_DIR}/data" \
+            -s "${NAC_VALIDATE_SCHEMA}" \
+            -r "${NAC_VALIDATE_RULES}" \
+            --non-strict
+          code=$?
+          set -e
+          if [ "$code" != "0" ]; then
+            echo "::warning::post-apply validation returned ${code} - the data model changed between plan and apply"
+          else
+            echo "post-apply validation: data model still valid"
+          fi
+          exit 0
+
       # ═══════════════ Post-change operational verification ═══════════════
       # SWITCH_USER / SWITCH_PASSWORD / NODE_MGMT_MAP / CHANGED_SUBNETS are
       # passed as ENVIRONMENT variables, not via --variable: nac-test rejects
@@ -917,10 +661,8 @@ jobs:
           CHANGED_SUBNETS: ''
           PYTHONWARNINGS:  'ignore:Unverified HTTPS request'
         run: |
-          # echo "fabric ICMP scope: ${CHANGED_SUBNETS:-<full sweep>}"
-          echo "Fabric ICMP scope: \`${SCOPE:-all configured subnets}\`"
-          echo "node map         : ${NODE_MGMT_MAP:-<EMPTY - fabric tests will skip>}"
-          [ -n "$SWITCH_USER" ] && echo "SWITCH_USER      : set" \
+          echo "node map: ${NODE_MGMT_MAP:-<EMPTY - fabric tests will skip>}"
+          [ -n "$SWITCH_USER" ] && echo "SWITCH_USER: set" \
             || echo "::warning::SWITCH_USER is empty - fabric iping tests will skip"
           [ -n "$NODE_MGMT_MAP" ] \
             || echo "::warning::NODE_MGMT_MAP repo variable is not set - every fabric iping test will SKIP"
@@ -1232,8 +974,7 @@ jobs:
           else
             echo "published to ${URL} - allow ~1 min for the Pages build"
           fi
-      
-      # ───── Summary: ND first, Terraform second ─────
+
       - name: Build step summary
         if: always()
         working-directory: .
@@ -1242,46 +983,31 @@ jobs:
           # All ${{ }} interpolation stays out of the script body - the runner
           # substitutes it as literal text before bash parses, so a quote or
           # newline in any upstream output would break or inject into the shell.
-          TOTAL:          ${{ steps.nactest.outputs.total }}
-          PASSED:         ${{ steps.nactest.outputs.passed }}
-          FAILED:         ${{ steps.nactest.outputs.failed }}
-          SKIPPED:        ${{ steps.nactest.outputs.skipped }}
-          # SCOPE:          ${{ needs.plan.outputs.changed_subnets }}
-
-          PLAN_SUMMARY:   ${{ needs.plan.outputs.summary }}
-          ND_CRITICAL:    ${{ needs.plan.outputs.nd_critical }}
-          ND_MAJOR:       ${{ needs.plan.outputs.nd_major }}
-          ND_UI_URL:      ${{ needs.plan.outputs.nd_ui_url }}
-          ND_UI_BASE:     ${{ vars.ND_HOST }}
-          PAGES_STAGED:   ${{ steps.pages.outputs.published }}
-          PAGES_DEPLOY:   ${{ steps.deploy.outcome }}
-          RUN_URL:        ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          REPORT_URL:     https://conmurphy.github.io/nac-webinar/reports/run-${{ github.run_number }}/
+          TOTAL:         ${{ steps.nactest.outputs.total }}
+          PASSED:        ${{ steps.nactest.outputs.passed }}
+          FAILED:        ${{ steps.nactest.outputs.failed }}
+          SKIPPED:       ${{ steps.nactest.outputs.skipped }}
+          PLAN_SUMMARY:  ${{ needs.plan.outputs.summary }}
+          VAL_WARNINGS:  ${{ needs.validate.outputs.warnings }}
+          PAGES_STAGED:  ${{ steps.pages.outputs.published }}
+          PAGES_DEPLOY:  ${{ steps.deploy.outcome }}
+          RUN_URL:       ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPORT_URL:    https://conmurphy.github.io/nac-webinar/reports/run-${{ github.run_number }}/
           FAILURES_FILE:          nac-test-failures.md
           BASELINE_FAILURES_FILE: nac-test-baseline-failures.md
         run: |
           set -uo pipefail
-
-          # Prefer the URL the ND report reports about itself; the hand-built
-          # path does not match every ND build. Same precedence as the PR comment.
-          ND_LINK="${ND_UI_URL:-}"
-          if [ -z "$ND_LINK" ] && [ -n "${ND_UI_BASE:-}" ]; then
-            ND_LINK="${ND_UI_BASE%/}${ND_PRECHANGE_UI_PATH:-/analysis-hub/pre-change-analysis}"
-          fi
-
           {
             echo '# Applied to APIC'
             echo ''
             echo "Plan applied: **${PLAN_SUMMARY:-unknown}**"
             echo ''
-            echo "Pre-change prediction: ${ND_CRITICAL:-0} critical, ${ND_MAJOR:-0} major"
+            echo "Pre-deploy validation: passed (${VAL_WARNINGS:-0} advisory warnings)"
             echo ''
-            [ -n "$ND_LINK" ] && echo "🔗 [Nexus Dashboard pre-change analysis](${ND_LINK})" && echo ''
             echo '---'
             echo ''
-            echo '## Post-change operational verification (nac-test)'
+            echo '## 3. Post-change operational verification (nac-test)'
             echo ''
-            # echo "Fabric ICMP scope: \`${SCOPE:-all configured subnets}\`"
             echo "Fabric ICMP scope: \`all subnets in plan\`"
             echo ''
 

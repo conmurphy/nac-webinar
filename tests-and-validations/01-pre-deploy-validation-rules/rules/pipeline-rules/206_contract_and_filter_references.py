@@ -12,7 +12,7 @@ from nac_validate import RuleBase, Violation
 
 
 class Rule(RuleBase):
-    id = "407"
+    id = "206"
     description = "Verify contract and filter references resolve within the tenant"
     severity = "HIGH"
     title = "Unresolved contract or filter reference"

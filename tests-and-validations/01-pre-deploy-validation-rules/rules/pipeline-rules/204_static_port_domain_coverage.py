@@ -28,7 +28,7 @@ DOMAIN_EXEMPTIONS = {
 
 
 class Rule(RuleBase):
-    id = "403"
+    id = "204"
     description = "Verify EPG static ports cover all required UCS domains (A and B)"
     severity = "HIGH"
     title = "Incomplete UCS domain coverage"

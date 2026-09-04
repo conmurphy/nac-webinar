@@ -14,7 +14,7 @@ from nac_validate import RuleBase, Violation
 
 
 class Rule(RuleBase):
-    id = "408"
+    id = "207"
     description = "Verify L3Out BGP peer IPs are within the SVI subnet"
     severity = "HIGH"
     title = "BGP peer outside interface subnet"

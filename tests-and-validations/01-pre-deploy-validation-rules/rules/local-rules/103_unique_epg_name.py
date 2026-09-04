@@ -1,5 +1,5 @@
 class Rule:
-    id = "03"
+    id = "103"
     description = "Verify unique EPG name"
     severity = "HIGH"
 

@@ -1,5 +1,5 @@
 class Rule:
-    id = "101"
+    id = "102"
     description = "Verify unique keys"
     severity = "HIGH"
 

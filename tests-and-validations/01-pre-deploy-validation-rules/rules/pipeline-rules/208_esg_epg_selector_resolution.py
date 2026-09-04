@@ -31,7 +31,7 @@ ENFORCE_SINGLE_ESG_MEMBERSHIP = True
 
 
 class Rule(RuleBase):
-    id = "410"
+    id = "208"
     description = (
         "Verify ESG epg_selectors resolve and cover every EPG"
     )

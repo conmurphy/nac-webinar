@@ -22,7 +22,7 @@ TENANT_VLAN_RANGES = {
 
 
 class Rule(RuleBase):
-    id = "406"
+    id = "104"
     description = "Verify encap VLANs are unique per tenant and within range"
     severity = "HIGH"
     title = "VLAN conflict or out of range"

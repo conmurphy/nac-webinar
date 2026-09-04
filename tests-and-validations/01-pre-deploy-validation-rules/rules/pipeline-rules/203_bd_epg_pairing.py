@@ -22,7 +22,7 @@ ORPHAN_BD_ALLOWLIST = {
 
 
 class Rule(RuleBase):
-    id = "402"
+    id = "203"
     description = "Verify every EPG resolves to a BD and every BD has an EPG"
     severity = "HIGH"
     title = "BD / EPG pairing broken"

@@ -35,7 +35,7 @@ def _name_to_network(name):
 
 
 class Rule(RuleBase):
-    id = "400"
+    id = "202"
     description = "Verify BD/EPG subnets fall within the tenant's allocated /21"
     severity = "HIGH"
     title = "Subnet outside tenant allocation"

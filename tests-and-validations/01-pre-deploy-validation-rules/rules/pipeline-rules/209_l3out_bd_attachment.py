@@ -19,7 +19,7 @@ from nac_validate import RuleBase, Violation
 
 
 class Rule(RuleBase):
-    id = "116"
+    id = "209"
     description = "Verify subnet public flag agrees with BD L3Out association"
     severity = "HIGH"
     title = "Subnet advertisement intent does not match L3Out association"

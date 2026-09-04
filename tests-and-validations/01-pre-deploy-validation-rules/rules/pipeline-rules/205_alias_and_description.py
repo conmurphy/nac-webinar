@@ -14,7 +14,7 @@ REQUIRE_DESCRIPTION = False
 
 
 class Rule(RuleBase):
-    id = "405"
+    id = "205"
     description = "Verify BDs, EPGs and application profiles have an alias"
     severity = "LOW"
     title = "Missing alias or description"
