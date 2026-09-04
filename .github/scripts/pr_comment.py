@@ -102,6 +102,18 @@ def build_verdict(val_result, plan_result, plan_exit, run_url):
             "then holds the apply for environment approval before anything "
             "reaches APIC.",
         )
+    # An empty exit code means the step was interrupted before it could record
+    # one - on this runner that is almost always an NFS stale file handle in the
+    # step script, not a problem with the configuration. Distinguish it, or a
+    # reviewer wastes time looking for a config fault that is not there.
+    if plan_result != "success" and not plan_exit:
+        return (
+            "## ⚠️ Terraform plan was interrupted",
+            f"The plan step did not record an exit code, which means it was cut "
+            f"short rather than failing on the configuration - typically a "
+            f"transient runner or filesystem error. **Re-run the job.** If it "
+            f"recurs, check the [logs]({run_url}) for `Stale file handle`.",
+        )
     return (
         "## ⚠️ Plan finished in an unexpected state",
         f"Terraform exited {plan_exit or '?'}, which is neither 'no changes' "
