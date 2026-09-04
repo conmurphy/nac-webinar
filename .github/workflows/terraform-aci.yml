@@ -1,18 +1,26 @@
 name: Terraform ACI
 
 on:
+  # Every commit on a PR branch: validate + plan, never apply. The default
+  # types (opened, synchronize, reopened) mean 'synchronize' re-runs this on
+  # each push to the branch, so there is no need for a feature-branch push
+  # trigger as well.
+  #
+  # NO paths filter here on purpose. If this workflow is a required status
+  # check and a PR touches only files outside the filter, the check never
+  # reports and the PR can never merge. Validation is seconds and a plan is
+  # about a minute - cheap insurance against a permanently-pending PR.
+  pull_request:
+    branches: [main]
+
+  # A push to main is a merged PR. This is the only path to apply.
   push:
     branches: [main]
     paths:
       - 'aci-config/**'
       - 'tests-and-validations/**'
       - '.github/workflows/terraform-aci.yml'
-      - '.github/workflows/scripts/**'
-  pull_request:
-    branches: [main]
-    paths:
-      - 'aci-config/**'
-      - 'tests-and-validations/**'
+
   workflow_dispatch:
     inputs:
       action:
@@ -22,9 +30,15 @@ on:
         type: choice
         options: [plan, apply]
 
+# Plan runs are per-ref and cancellable: a newer commit supersedes an in-flight
+# plan for the same PR. Merges to main share one group and are never cancelled,
+# so an apply can never be interrupted half way through.
+#
+# Note both still contend for the Terraform state lock; -lock-timeout=300s makes
+# them queue rather than fail.
 concurrency:
-  group: terraform-aci
-  cancel-in-progress: false
+  group: terraform-aci-${{ github.event_name == 'push' && 'main' || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # ---- Terraform ----
@@ -111,7 +125,6 @@ jobs:
     runs-on: [self-hosted, openshift, aci]
     permissions:
       contents: read
-      pull-requests: write
     outputs:
       exitcode: ${{ steps.validate.outputs.exitcode }}
       high:     ${{ steps.validate.outputs.high }}
@@ -275,42 +288,6 @@ jobs:
           retention-days: 5
           if-no-files-found: warn
 
-      - name: Comment validation failure on PR
-        if: failure() && github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return ''; } };
-
-            // The rendered summary is already markdown, so reuse it verbatim
-            // rather than maintaining a second layout.
-            let md = read('validate-summary.md');
-            if (!md.trim()) md = '```text\n' + read('validate-all.txt').slice(0, 20000) + '\n```';
-            if (md.length > 60000) md = md.slice(0, 60000) + '\n\n_... truncated, see the job summary._';
-
-            const body = [
-              md,
-              '',
-              '---',
-              '',
-              '**Reproduce locally**',
-              '',
-              '```bash',
-              'nac-validate \',
-              '  -s tests-and-validations/01-pre-deploy-validation-rules/schemas/apic_schema.yaml \',
-              '  -r tests-and-validations/01-pre-deploy-validation-rules/rules/local-rules \',
-              '  -r tests-and-validations/01-pre-deploy-validation-rules/rules/pipeline-rules \',
-              '  aci-config/data',
-              '```'
-            ].join('\n');
-
-            await github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body
-            });
 
 # ══════════════════════════════════════════════════════════
   # JOB 2 — Terraform plan
@@ -323,7 +300,6 @@ jobs:
     environment: aci-tenant-emea-cto-plan
     permissions:
       contents: read
-      pull-requests: write
     defaults:
       run:
         working-directory: ${{ env.WORKING_DIR }}
@@ -536,67 +512,249 @@ jobs:
           retention-days: 5
           if-no-files-found: warn
 
-      - name: Comment on PR
-        if: always() && github.event_name == 'pull_request'
+# ══════════════════════════════════════════════════════════
+  # JOB 3 — PR report
+  #
+  # One sticky comment covering validation and plan, updated in place on every
+  # commit rather than appended. Owns all PR commenting so validate and plan can
+  # stay on contents:read.
+  # ══════════════════════════════════════════════════════════
+  report:
+    name: PR report
+    needs: [validate, plan]
+    # always(): a validation failure skips the plan job entirely, and that is
+    # precisely when the reviewer most needs the comment.
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # continue-on-error: the artifact does not exist when its job was skipped
+      # or failed early. The report degrades rather than failing.
+      - name: Download validation report
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: nac-validate
+          path: reports/validate
+
+      - name: Download plan report
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: reports/plan
+
+      - name: Show what was downloaded
+        run: find reports -type f 2>/dev/null | sort || echo "(no artifacts)"
+
+      - name: Post or update PR comment
         uses: actions/github-script@v7
         env:
-          PLAN_SUMMARY: ${{ steps.summary.outputs.line }}
-          TEST_SCOPE:   ${{ steps.changed.outputs.subnets }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          PLAN_RESULT:     ${{ needs.plan.result }}
+          PLAN_EXITCODE:   ${{ needs.plan.outputs.exitcode }}
+          PLAN_SUMMARY:    ${{ needs.plan.outputs.summary }}
+          VAL_HIGH:        ${{ needs.validate.outputs.high }}
+          VAL_MEDIUM:      ${{ needs.validate.outputs.medium }}
+          VAL_LOW:         ${{ needs.validate.outputs.low }}
+          SCOPE:           ${{ needs.plan.outputs.changed_subnets }}
+          RUN_URL:         ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         with:
           script: |
             const fs = require('fs');
-            const dir = process.env.WORKING_DIR;
-            const read = (f, fallback) => {
-              try { return fs.readFileSync(`${dir}/${f}`, 'utf8'); }
-              catch { return fallback; }
+
+            // Hidden marker used to find this comment on later runs so it is
+            // edited in place. Without it, a ten-commit PR ends up with ten
+            // near-identical comments.
+            const MARKER = '<!-- aci-nac-report -->';
+            const GH_COMMENT_LIMIT = 65536;
+
+            // upload-artifact v4 strips the common path prefix, so a file
+            // uploaded as aci-config/tfplan.txt may land either flattened or
+            // nested depending on what else was in the artifact.
+            const read = (...candidates) => {
+              for (const p of candidates) {
+                try {
+                  const s = fs.readFileSync(p, 'utf8');
+                  if (s.trim()) return s;
+                } catch { /* try the next candidate */ }
+              }
+              return '';
             };
-            let plan = read('tfplan.txt', '_No plan output._');
-            const table = read('plan-summary.md', '');
-            if (plan.length > 30000) plan = plan.slice(0, 30000) + '\n... truncated';
 
-            const body = [
-              '## ACI change plan',
+            const valSummary = read('reports/validate/validate-summary.md');
+            const valRaw     = read('reports/validate/validate-all.txt');
+            const planTable  = read('reports/plan/plan-summary.md',
+                                    'reports/plan/aci-config/plan-summary.md');
+            const planRaw    = read('reports/plan/tfplan.txt',
+                                    'reports/plan/aci-config/tfplan.txt');
+
+            const valResult   = process.env.VALIDATE_RESULT || 'unknown';
+            const planResult  = process.env.PLAN_RESULT || 'skipped';
+            const planExit    = process.env.PLAN_EXITCODE || '';
+            const planLine    = process.env.PLAN_SUMMARY || 'unknown';
+            const high        = process.env.VAL_HIGH || '0';
+            const medium      = process.env.VAL_MEDIUM || '0';
+            const low         = process.env.VAL_LOW || '0';
+            const scope       = process.env.SCOPE || '';
+            const runUrl      = process.env.RUN_URL;
+
+            // ---- headline verdict -------------------------------------------
+            let verdict, next;
+            if (valResult !== 'success') {
+              verdict = '## ❌ Blocked at data model validation';
+              next = 'Fix the violations below and push again. No Terraform ' +
+                     'plan was produced, so there is nothing to review yet.';
+            } else if (planResult !== 'success') {
+              verdict = '## ❌ Validation passed, Terraform plan failed';
+              next = `Validation is clean but the plan did not complete. ` +
+                     `See the [job logs](${runUrl}).`;
+            } else if (planExit === '0') {
+              verdict = '## ✅ Validation passed · no infrastructure changes';
+              next = 'Safe to merge. The apply job will be skipped because the ' +
+                     'plan is empty.';
+            } else if (planExit === '2') {
+              verdict = '## ✅ Validation passed · changes ready to apply';
+              next = 'Merging this PR runs validation and the plan again against ' +
+                     '`main`, then holds the apply for environment approval ' +
+                     'before touching APIC.';
+            } else {
+              verdict = '## ⚠️ Plan finished in an unexpected state';
+              next = `Terraform exited ${planExit}. Review before merging.`;
+            }
+
+            const parts = [
+              MARKER,
+              '# ACI Network as Code — change review',
               '',
-              '✅ Data model validation passed.',
+              verdict,
               '',
-              '`' + (process.env.PLAN_SUMMARY || 'unknown') + '`',
+              '| gate | result | detail |',
+              '| --- | --- | --- |',
+              `| 1. Data model validation | ${valResult === 'success' ? '✅ passed' : '❌ failed'} | ` +
+                `${high} HIGH · ${medium} MEDIUM · ${low} LOW |`,
+              `| 2. Terraform plan | ${planResult === 'success' ? (planExit === '2' ? '⚠️ changes' : '✅ no changes') : (planResult === 'skipped' ? '⏭️ skipped' : '❌ failed')} | ` +
+                `\`${planLine}\` |`,
+              `| 3. Apply to APIC | ⏸️ on merge | requires approval |`,
               '',
-              table.trim(),
+              `**What happens next:** ${next}`,
               '',
-              '**Post-deploy test scope:** `' +
-                (process.env.TEST_SCOPE || 'all configured subnets (full sweep)') + '`',
+              '---',
+              ''
+            ];
+
+            // ---- validation detail ------------------------------------------
+            if (valSummary.trim()) {
+              // Already rendered markdown; drop its own H1 so this comment has
+              // a single title.
+              parts.push(valSummary.replace(/^# .*\n/, '').trim());
+            } else if (valRaw.trim()) {
+              parts.push('## 1. Data model validation', '', '```text',
+                         valRaw.slice(0, 20000), '```');
+            } else {
+              parts.push('## 1. Data model validation', '',
+                         '_No validation report was produced._');
+            }
+            parts.push('', '---', '');
+
+            // ---- plan detail -------------------------------------------------
+            parts.push('## 2. Terraform plan', '');
+            if (planResult === 'skipped') {
+              parts.push('_Skipped: validation must pass first._');
+            } else {
+              parts.push('`' + planLine + '`', '');
+              if (planTable.trim()) parts.push(planTable.trim(), '');
+              parts.push('**Post-deploy test scope:** `' +
+                         (scope || 'all configured subnets (full sweep)') + '`', '');
+              if (planRaw.trim()) {
+                parts.push('<details><summary>Raw terraform plan</summary>', '',
+                           '```hcl', planRaw.trim(), '```', '</details>');
+              }
+            }
+
+            parts.push('', '---', '',
+              '<sub>Reproduce validation locally:</sub>',
               '',
-              '<details><summary>Show plan</summary>',
-              '',
-              '```hcl',
-              plan,
+              '```bash',
+              'nac-validate \',
+              '  -s tests-and-validations/01-pre-deploy-validation-rules/schemas/apic_schema.yaml \',
+              '  -r tests-and-validations/01-pre-deploy-validation-rules/rules/local-rules \',
+              '  -r tests-and-validations/01-pre-deploy-validation-rules/rules/pipeline-rules \',
+              '  aci-config/data',
               '```',
-              '</details>'
-            ].join('\n');
+              '',
+              `<sub>[Full run and step summary](${runUrl}) · commit \`${context.sha.slice(0, 7)}\`</sub>`
+            );
 
-            await github.rest.issues.createComment({
+            let body = parts.join('\n');
+
+            // Trim the raw plan first - it is the largest and least essential
+            // block, and the verdict must survive truncation.
+            if (body.length > GH_COMMENT_LIMIT) {
+              const marker = '<details><summary>Raw terraform plan</summary>';
+              const idx = body.indexOf(marker);
+              if (idx > 0) {
+                body = body.slice(0, idx) +
+                  `_Raw plan omitted (comment size limit). See the ` +
+                  `[job summary](${runUrl})._\n`;
+              }
+            }
+            if (body.length > GH_COMMENT_LIMIT) {
+              body = body.slice(0, GH_COMMENT_LIMIT - 200) +
+                `\n\n_... truncated. See the [job summary](${runUrl})._`;
+            }
+
+            // ---- upsert ------------------------------------------------------
+            const { data: comments } = await github.rest.issues.listComments({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body
+              per_page: 100,
             });
+            const existing = comments.find(c => (c.body || '').includes(MARKER));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+              core.info(`updated comment ${existing.id}`);
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+              core.info('created a new comment');
+            }
+
 # ══════════════════════════════════════════════════════════
-  # JOB 3 — Apply + post-change verification
+  # JOB 4 — Apply + post-change verification
   # main only, blocks on required reviewers.
   # ══════════════════════════════════════════════════════════
   apply:
     name: Apply to APIC
     needs: [validate, plan]
+    # Apply only on a merge to main (a push to main IS a merged PR) or an
+    # explicit manual dispatch. Never on a pull_request event, so a PR can
+    # never reach APIC no matter what it contains.
+    #
+    # Branch protection is what guarantees a push to main came from a reviewed
+    # PR - this condition alone does not prevent a direct push.
     if: |
+      needs.validate.result == 'success' &&
+      needs.plan.result == 'success' &&
       needs.plan.outputs.exitcode == '2' &&
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' ||
        (github.event_name == 'workflow_dispatch' && inputs.action == 'apply'))
     runs-on: [self-hosted, openshift, aci]
     environment: aci-tenant-emea-cto
-    # gh-pages publishing pushes a commit with GITHUB_TOKEN, which requires
-    # write. Job-level permissions override the workflow default, so the plan
-    # job stays read-only for contents.
     permissions:
       contents: write
     defaults:
