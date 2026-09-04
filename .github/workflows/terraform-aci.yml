@@ -198,7 +198,7 @@ jobs:
           if grep -q 'Traceback (most recent call last)' validate-all.txt; then
             echo "::error::a rule raised an exception - it did NOT evaluate. Treat this as a failure, not a pass."
           fi
- 
+
           # Severity counts for downstream jobs. Every violation blocks
           # regardless of severity; these are for reporting only.
           sev_count() {
