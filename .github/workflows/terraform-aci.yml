@@ -1049,7 +1049,6 @@ jobs:
           FAILED:        ${{ steps.nactest.outputs.failed }}
           SKIPPED:       ${{ steps.nactest.outputs.skipped }}
           PLAN_SUMMARY:  ${{ needs.plan.outputs.summary }}
-          VAL_WARNINGS:  ${{ needs.validate.outputs.warnings }}
           VAL_LOW:       ${{ needs.validate.outputs.low }}
           PAGES_STAGED:  ${{ steps.pages.outputs.published }}
           PAGES_DEPLOY:  ${{ steps.deploy.outcome }}
