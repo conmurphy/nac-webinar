@@ -1,7 +1,23 @@
-class Rule:
+from nac_validate import RuleBase, Violation
+
+
+class Rule(RuleBase):
     id = "102"
     description = "Verify unique keys"
     severity = "HIGH"
+
+    title = "Duplicated keys in the config"
+    affected_items_label = "Duplicated keys"
+
+    explanation = """\
+The same named object is declared more than once at the same level of the data
+model. """
+
+    recommendation = """\
+Locate every declaration of the reported value:
+
+  grep -rn "<duplicated-value>" aci-config/data/
+"""
 
     paths = [
         "apic.access_policies.qos.qos_classes.level",
@@ -250,10 +266,35 @@ class Rule:
 
     @classmethod
     def _format(cls, full_path, value, parent_context):
-        base = "{} - {}".format(full_path, value)
-        if not parent_context:
-            return base
-        return "{} [in {}]".format(base, " / ".join(parent_context))
+        """
+        Build a Violation.
+
+        The dotted path says WHICH key must be unique; parent_context says WHERE
+        the collision happened. With seven tenants in one file, the context is
+        the part that makes the finding actionable.
+        """
+        segments = full_path.split(".")
+        leaf = segments[-1]
+        container = ".".join(segments[:-1])
+        where = " in {}".format(" / ".join(parent_context)) if parent_context else ""
+        location = full_path
+        if parent_context:
+            location = "{} [{}]".format(full_path, " / ".join(parent_context))
+
+        return Violation(
+            message=(
+                "duplicate {} '{}'{} - the last declaration wins and the "
+                "earlier one is discarded".format(leaf, value, where)
+            ),
+            path=location,
+            details={
+                "key": full_path,
+                "container": container,
+                "leaf": leaf,
+                "duplicate_value": value,
+                "context": list(parent_context),
+            },
+        )
 
     @classmethod
     def match_path(cls, inventory, full_path, search_path, parent_context=None):
@@ -290,10 +331,17 @@ class Rule:
                     continue
                 value = i.get(path_elements[-1])
                 if isinstance(value, list):
-                    values = []
+                    # List-valued keys are checked WITHIN each item, not across
+                    # items: two bridge domains legitimately share the same
+                    # l3outs entry, but one BD listing it twice is a fault.
+                    #
+                    # Uses its own accumulator. Reusing `values` here reset the
+                    # scalar accumulator as a side effect, so a scalar duplicate
+                    # appearing after a list-valued item went unreported.
+                    seen_in_item = []
                     for v in value:
-                        if v not in values:
-                            values.append(v)
+                        if v not in seen_in_item:
+                            seen_in_item.append(v)
                         else:
                             results.append(cls._format(full_path, v, parent_context))
                 elif value:

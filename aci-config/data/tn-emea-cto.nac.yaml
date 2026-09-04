@@ -8,7 +8,7 @@ apic:
 
       vrfs:
         - name: vrf-external
-        - name: vrf-external
+        - name: vrf-external 
           
       bridge_domains:
         - name: 198.18.215.128_26 
