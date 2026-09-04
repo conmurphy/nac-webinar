@@ -232,8 +232,7 @@ def render(report, inventory, problems, exitcode):
                 "pass."]
     else:
         out += [f"## ❌ {total} violation(s) - plan blocked", "",
-                "Every violation blocks the pipeline regardless of severity. "
-                "Severity indicates urgency, not whether the gate opens."]
+                "Every violation blocks the pipeline regardless of severity. "]
     out.append("")
 
     if problems:
@@ -294,8 +293,8 @@ def render(report, inventory, problems, exitcode):
 
         why = block(f["explanation"])
         if why:
-            out += ["<details><summary>Why this matters</summary>", "",
-                    why, "", "</details>", ""]
+            out += ["### Why this matters", "",
+                    why, "", "", ""]
 
         fix = block(f["recommendation"])
         if fix:
