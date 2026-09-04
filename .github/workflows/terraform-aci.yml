@@ -258,62 +258,7 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Build validation summary
-        if: always()
-        env:
-          EXITCODE: ${{ steps.validate.outputs.exitcode }}
-          HIGH:     ${{ steps.validate.outputs.high }}
-          MEDIUM:   ${{ steps.validate.outputs.medium }}
-          LOW:      ${{ steps.validate.outputs.low }}
-        run: |
-          set -uo pipefail
-          {
-            echo '# 1. Data model validation (nac-validate)'
-            echo ''
-            if [ "${EXITCODE:-1}" = "0" ]; then
-              echo "✅ **Data model is valid.** ${LOW:-0} advisory finding(s)."
-            else
-              echo "❌ **${HIGH:-0} HIGH severity violation(s).** The plan will not run until these are fixed."
-            fi
-            echo ''
-            echo '| severity | violations |'
-            echo '| --- | --- |'
-            echo "| HIGH | ${HIGH:-0} |"
-            echo "| MEDIUM | ${MEDIUM:-0} |"
-            echo "| LOW | ${LOW:-0} |"
-            echo ''
-
-            # Generated from the rule files rather than hand-maintained, so the
-            # list cannot drift as rules are added, renamed or retiered.
-            echo '<details><summary>Rules applied</summary>'
-            echo ''
-            for tier in "local:${NAC_VALIDATE_LOCAL_RULES}" "pipeline:${NAC_VALIDATE_PIPELINE_RULES}"; do
-              label="${tier%%:*}"
-              dir="${tier#*:}"
-              echo "**${label} tier**"
-              echo ''
-              for f in "${dir}"/*.py; do
-                [ -f "$f" ] || continue
-                base="$(basename "$f" .py)"
-                rid="${base%%_*}"
-                name="$(printf '%s' "${base#*_}" | tr '_' ' ')"
-                printf -- '- `%s` %s\n' "$rid" "$name"
-              done
-              echo ''
-            done
-            echo '</details>'
-            echo ''
-
-            if [ -s validate-all.txt ]; then
-              echo '<details><summary>Full validation output</summary>'
-              echo ''
-              echo '```text'
-              head -c 40000 validate-all.txt
-              echo ''
-              echo '```'
-              echo '</details>'
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+    
 
       - name: Upload validation output
         if: always()

@@ -2,20 +2,26 @@
 """
 Render nac-validate results as a GitHub step summary.
 
-Reads the JSON report (--format json) for findings, and imports the rule modules
-to recover the context attributes the JSON payload omits: severity, title,
-explanation, recommendation and references. That way the text already written in
-each rule file is reused rather than duplicated in the workflow.
+Reads the JSON report (--format json) for findings, and STATICALLY parses the
+rule files for the context attributes the JSON payload omits: severity, title,
+explanation, recommendation, references.
+
+Deliberately does NOT import the rule modules. Two reasons:
+  1. Rules import nac_validate (RuleBase, Violation), which is only present in
+     the interpreter nac-validate itself runs under - not necessarily the system
+     python3 that executes this script.
+  2. Importing executes module-level code. A rule with a startup consistency
+     guard would raise, and a reporting tool must never have side effects.
+
+ast.literal_eval on the class body gives every attribute we need, since they are
+all plain literals.
 
 Usage:
   validate_summary.py REPORT.json --rules DIR [--rules DIR] [--exitcode N]
-
-Exit codes mirrored from nac-validate:
-  0 pass | 1 semantic violations | 2 syntax/schema error | 3 configuration error
 """
 
 import argparse
-import importlib.util
+import ast
 import json
 import os
 import sys
@@ -23,81 +29,169 @@ import sys
 SEVERITY_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
 SEVERITY_ICON = {"HIGH": "🔴", "MEDIUM": "🟠", "LOW": "🟡"}
 
+# Class attributes worth surfacing. Anything else in the rule body is ignored.
+ATTR_NAMES = frozenset({
+    "id", "description", "severity", "title", "explanation",
+    "recommendation", "affected_items_label", "references",
+})
+
 # Cap per-rule findings so one broad rule cannot blow the 1 MiB step-summary
 # limit. The full list stays in the artifact and the job log.
 MAX_FINDINGS_PER_RULE = 25
 
+# Rules whose findings should lead the summary regardless of ID ordering.
+# Segmentation breaches are the headline finding; everything else is detail.
+PRIORITY_RULE_IDS = ("210",)
+
+
+def esc_cell(text):
+    """Make text safe for a markdown table cell."""
+    return str(text).replace("|", "\|").replace("\n", " ")
+
+
+def parse_rule_attrs(path):
+    """
+    Extract the `Rule` class attributes from a rule file without importing it.
+    Returns a dict, or None if the file has no `Rule` class.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read(), filename=path)
+    except (OSError, SyntaxError) as exc:
+        raise ValueError(f"{type(exc).__name__}: {exc}") from exc
+
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.ClassDef) and node.name == "Rule"):
+            continue
+
+        attrs = {}
+        for stmt in node.body:
+            # Plain assignment: severity = "HIGH"
+            if isinstance(stmt, ast.Assign):
+                targets = [t for t in stmt.targets if isinstance(t, ast.Name)]
+                value = stmt.value
+            # Annotated assignment: id: str = "101"
+            elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                targets = [stmt.target]
+                value = stmt.value
+            else:
+                continue
+
+            if value is None:
+                continue
+            for target in targets:
+                if target.id not in ATTR_NAMES:
+                    continue
+                try:
+                    attrs[target.id] = ast.literal_eval(value)
+                except (ValueError, SyntaxError):
+                    # f-string or computed value - not a literal, skip it.
+                    pass
+        return attrs
+
+    return None
+
 
 def load_rule_metadata(rule_dirs):
     """
-    id -> {severity, title, explanation, recommendation, references,
-           affected_items_label, tier, filename}
+    id -> metadata dict, plus a list of files that could not be read.
 
-    Rules are imported, not parsed: the attributes are plain class fields and
-    importing is both simpler and immune to formatting changes. An import failure
-    is recorded rather than raised - a rule that will not load is itself a
-    finding worth surfacing.
+    A file that cannot be parsed is reported rather than raised: a rule that will
+    not load is itself worth surfacing, because it did not evaluate.
     """
     meta = {}
-    broken = []
+    problems = []
 
     for rule_dir in rule_dirs:
         tier = os.path.basename(rule_dir.rstrip("/")) or rule_dir
         if not os.path.isdir(rule_dir):
+            problems.append((tier, "-", "rule directory not found"))
             continue
 
         for fname in sorted(os.listdir(rule_dir)):
             if not fname.endswith(".py") or fname.startswith("_"):
                 continue
             path = os.path.join(rule_dir, fname)
-            modname = f"_nacrule_{tier}_{fname[:-3]}".replace("-", "_")
 
             try:
-                spec = importlib.util.spec_from_file_location(modname, path)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-                rule = getattr(module, "Rule")
-            except Exception as exc:                      # noqa: BLE001
-                broken.append((tier, fname, f"{type(exc).__name__}: {exc}"))
+                attrs = parse_rule_attrs(path)
+            except ValueError as exc:
+                problems.append((tier, fname, str(exc)))
                 continue
 
-            rid = str(getattr(rule, "id", "")).strip()
+            if attrs is None:
+                problems.append((tier, fname, "no class named 'Rule' found"))
+                continue
+
+            rid = str(attrs.get("id", "")).strip()
             if not rid:
-                broken.append((tier, fname, "Rule class has no 'id' attribute"))
+                problems.append((tier, fname, "Rule has no literal 'id'"))
                 continue
 
             if rid in meta:
-                broken.append((
+                problems.append((
                     tier, fname,
                     f"duplicate rule id '{rid}' - also declared by "
                     f"{meta[rid]['tier']}/{meta[rid]['filename']}"
                 ))
 
+            refs = attrs.get("references") or []
+            if isinstance(refs, str):
+                refs = [refs]
+
             meta[rid] = {
-                "severity": str(getattr(rule, "severity", "HIGH")).upper(),
-                "description": getattr(rule, "description", ""),
-                "title": getattr(rule, "title", ""),
-                "explanation": getattr(rule, "explanation", ""),
-                "recommendation": getattr(rule, "recommendation", ""),
-                "references": list(getattr(rule, "references", []) or []),
-                "affected_items_label": getattr(rule, "affected_items_label",
-                                                "Affected Items"),
+                "severity": str(attrs.get("severity", "HIGH")).upper(),
+                "description": attrs.get("description", ""),
+                "title": attrs.get("title", ""),
+                "explanation": attrs.get("explanation", ""),
+                "recommendation": attrs.get("recommendation", ""),
+                "affected_items_label": attrs.get("affected_items_label",
+                                                  "Affected items"),
+                "references": list(refs),
                 "tier": tier,
                 "filename": fname,
             }
 
-    return meta, broken
+    return meta, problems
+
+
+def normalise_error(err):
+    """
+    Return (path, message).
+
+    JSON errors are objects, not strings. Simple string-list rules produce
+    {"message": "..."}; structured rules using Violation add "path" and
+    "details". A bare string is also handled in case the format changes.
+    """
+    if isinstance(err, dict):
+        message = str(err.get("message", "")).strip()
+        path = str(err.get("path") or "").strip()
+    else:
+        message = str(err).strip()
+        path = ""
+
+    # Simple rules embed the path as a "path - message" prefix.
+    if not path and " - " in message:
+        candidate, _, rest = message.partition(" - ")
+        if " " not in candidate and candidate:
+            path, message = candidate, rest
+
+    return path, message
 
 
 def block(text):
-    """Collapse a triple-quoted attribute into a markdown-safe paragraph."""
+    """Collapse a triple-quoted attribute into markdown-safe lines."""
     if not text:
         return ""
-    lines = [ln.rstrip() for ln in str(text).strip().splitlines()]
-    return "\n".join(lines)
+    return "\n".join(ln.rstrip() for ln in str(text).strip().splitlines())
 
 
-def render(report, meta, broken, exitcode):
+def sort_key(finding):
+    priority = 0 if finding["id"] in PRIORITY_RULE_IDS else 1
+    return (priority, SEVERITY_ORDER.get(finding["severity"], 9), finding["id"])
+
+
+def render(report, meta, problems, exitcode):
     out = []
     syntax = report.get("syntax_errors") or []
     semantic = report.get("semantic_errors") or []
@@ -108,14 +202,12 @@ def render(report, meta, broken, exitcode):
         info = meta.get(rid, {})
         findings.append({
             "id": rid,
-            "description": entry.get("description")
-                           or info.get("description", ""),
+            "description": entry.get("description") or info.get("description", ""),
             "errors": entry.get("errors") or [],
             "meta": info,
             "severity": info.get("severity", "HIGH"),
         })
-
-    findings.sort(key=lambda f: (SEVERITY_ORDER.get(f["severity"], 9), f["id"]))
+    findings.sort(key=sort_key)
 
     counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
     for f in findings:
@@ -125,11 +217,11 @@ def render(report, meta, broken, exitcode):
     out.append("# 1. Data model validation")
     out.append("")
 
-    # ---- verdict -----------------------------------------------------------
     if exitcode == 0:
         out.append("## ✅ Passed")
         out.append("")
-        out.append(f"All **{len(meta)}** rules satisfied. No violations found.")
+        out.append(f"All **{len(meta)}** rules satisfied across "
+                   f"{len({m['tier'] for m in meta.values()})} tier(s).")
     elif exitcode == 2:
         out.append("## ❌ Syntax / schema validation failed")
         out.append("")
@@ -138,43 +230,40 @@ def render(report, meta, broken, exitcode):
     elif exitcode == 3:
         out.append("## ❌ Configuration error")
         out.append("")
-        out.append("nac-validate could not run: a schema is missing, or a rule "
-                   "directory is invalid. **Nothing was validated** - do not "
-                   "read this as a pass.")
+        out.append("nac-validate could not run - missing schema or invalid rule "
+                   "directory. **Nothing was validated.** Do not read this as a "
+                   "pass.")
     else:
-        blockers = counts["HIGH"] + counts["MEDIUM"] + counts["LOW"]
-        out.append(f"## ❌ {blockers} violation(s) - plan blocked")
+        out.append(f"## ❌ {total} violation(s) - plan blocked")
         out.append("")
-        out.append("Every violation blocks, regardless of severity. "
+        out.append("Every violation blocks the pipeline regardless of severity. "
                    "Severity indicates urgency, not whether the gate opens.")
     out.append("")
 
-    # ---- rules that failed to load ----------------------------------------
-    if broken:
-        out.append("### ⚠️ Rules that could not be loaded")
+    if problems:
+        out.append("### ⚠️ Rules that could not be read")
         out.append("")
-        out.append("These rules did **not** evaluate. A rule that fails to load "
-                   "is indistinguishable from a rule that passes.")
+        out.append("Context for these rules is unavailable, so their findings "
+                   "below show without an explanation or fix.")
         out.append("")
         out.append("| tier | file | problem |")
         out.append("| --- | --- | --- |")
-        for tier, fname, why in broken:
-            out.append(f"| `{tier}` | `{fname}` | {why.replace('|', '\|')} |")
+        for tier, fname, why in problems:
+            out.append(f"| `{tier}` | `{fname}` | {esc_cell(why)} |")
         out.append("")
 
-    # ---- syntax errors ----------------------------------------------------
     if syntax:
         out.append("### Syntax errors")
         out.append("")
         out.append("```text")
         for err in syntax[:MAX_FINDINGS_PER_RULE]:
-            out.append(str(err))
+            _, message = normalise_error(err)
+            out.append(message)
         if len(syntax) > MAX_FINDINGS_PER_RULE:
             out.append(f"... {len(syntax) - MAX_FINDINGS_PER_RULE} more")
         out.append("```")
         out.append("")
 
-    # ---- severity roll-up -------------------------------------------------
     if total:
         out.append("| severity | violations | rules |")
         out.append("| --- | --- | --- |")
@@ -186,40 +275,36 @@ def render(report, meta, broken, exitcode):
                        f"{', '.join('`' + i + '`' for i in ids)} |")
         out.append("")
 
-    # ---- per-rule detail --------------------------------------------------
     for f in findings:
         info = f["meta"]
         icon = SEVERITY_ICON.get(f["severity"], "")
         heading = info.get("title") or f["description"] or f"Rule {f['id']}"
-        tier = info.get("tier", "?")
+        tier = info.get("tier", "unknown")
 
         out.append("---")
         out.append("")
         out.append(f"### {icon} `{f['id']}` {heading}")
         out.append("")
-        out.append(f"**{f['severity']}** · {tier} tier · "
+        out.append(f"**{f['severity']}** · `{tier}` · "
                    f"{len(f['errors'])} violation(s)")
         if info.get("title") and f["description"]:
             out.append("")
             out.append(f"_{f['description']}_")
         out.append("")
 
-        label = info.get("affected_items_label") or "Affected items"
-        out.append(f"**{label}**")
+        out.append(f"**{info.get('affected_items_label') or 'Affected items'}**")
         out.append("")
         shown = f["errors"][:MAX_FINDINGS_PER_RULE]
         for err in shown:
-            # Findings are "path - message"; split so the path renders as code
-            # and the message stays readable.
-            text = str(err).strip()
-            path, sep, message = text.partition(" - ")
-            if sep and " " not in path:
-                out.append(f"- `{path}`  \n  {message}")
+            path, message = normalise_error(err)
+            if path:
+                out.append(f"- `{path}`")
+                out.append(f"  {message}")
             else:
-                out.append(f"- {text}")
+                out.append(f"- {message}")
         if len(f["errors"]) > len(shown):
             out.append(f"- _... {len(f['errors']) - len(shown)} more - see the "
-                       f"full output below_")
+                       f"raw output below_")
         out.append("")
 
         why = block(info.get("explanation"))
@@ -235,7 +320,7 @@ def render(report, meta, broken, exitcode):
         if fix:
             out.append("**How to fix**")
             out.append("")
-            # Indented recommendation text is almost always a YAML snippet.
+            # An indented recommendation is almost always a YAML snippet.
             if any(ln.startswith(("  ", "\t")) for ln in fix.splitlines()):
                 out.append("```yaml")
                 out.append(fix)
@@ -244,26 +329,34 @@ def render(report, meta, broken, exitcode):
                 out.append(fix)
             out.append("")
 
-        for ref in info.get("references") or []:
+        refs = info.get("references") or []
+        for ref in refs:
             out.append(f"- [reference]({ref})")
-        if info.get("references"):
+        if refs:
             out.append("")
 
-    # ---- rules that passed ------------------------------------------------
+        if not why and not fix:
+            out.append(f"> No `explanation` or `recommendation` set on this "
+                       f"rule. Add them to "
+                       f"`{tier}/{info.get('filename', '?')}` so this section "
+                       f"tells the reader what to do.")
+            out.append("")
+
     failed_ids = {f["id"] for f in findings}
     passed = sorted((rid for rid in meta if rid not in failed_ids),
                     key=lambda r: (meta[r]["tier"], r))
     if passed:
         out.append("---")
         out.append("")
-        out.append(f"<details><summary>{len(passed)} rule(s) passed</summary>")
+        out.append(f"<details><summary>{len(passed)} of {len(meta)} rules "
+                   f"passed</summary>")
         out.append("")
-        out.append("| rule | tier | check |")
-        out.append("| --- | --- | --- |")
+        out.append("| rule | tier | severity | check |")
+        out.append("| --- | --- | --- | --- |")
         for rid in passed:
             m = meta[rid]
-            out.append(f"| `{rid}` | {m['tier']} | "
-                       f"{m['description'].replace('|', '\|')} |")
+            out.append(f"| `{rid}` | {m['tier']} | {m['severity']} | "
+                       f"{esc_cell(m['description'])} |")
         out.append("")
         out.append("</details>")
         out.append("")
@@ -283,14 +376,15 @@ def main():
         with open(args.report) as fh:
             report = json.load(fh)
     except (OSError, ValueError) as exc:
-        # Never let the summary renderer mask a validation failure.
-        print(f"# 1. Data model validation\n\n"
-              f"⚠️ Could not read the JSON report (`{exc}`). "
+        # Never let the renderer mask a validation failure.
+        print("# 1. Data model validation")
+        print("")
+        print(f"⚠️ Could not read the JSON report (`{exc}`). "
               f"nac-validate exited **{args.exitcode}** - see the job log.")
         return 0
 
-    meta, broken = load_rule_metadata(args.rules)
-    print(render(report, meta, broken, args.exitcode))
+    meta, problems = load_rule_metadata(args.rules)
+    print(render(report, meta, problems, args.exitcode))
     return 0
 
 
