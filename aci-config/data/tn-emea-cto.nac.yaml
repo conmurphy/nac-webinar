@@ -24,14 +24,14 @@ apic:
         #   vrf: vrf-external
         #   subnets:
         #   - ip: 198.18.215.65/26
-        - name: app-02-web
-          alias: 198.18.215.128_26 
-          vrf: vrf-external
-          subnets:
-          - ip: 198.18.215.129/26
-            public: true
-          l3outs:
-          - l3out-to-core-01
+        # - name: app-02-web
+        #   alias: 198.18.215.128_26 
+        #   vrf: vrf-external
+        #   subnets:
+        #   - ip: 198.18.215.129/26
+        #     public: true
+        #   l3outs:
+        #   - l3out-to-core-01
 
 
       application_profiles:
