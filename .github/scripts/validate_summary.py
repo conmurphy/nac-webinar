@@ -2,19 +2,20 @@
 """
 Render nac-validate results as a GitHub step summary.
 
-Reads the JSON report (--format json) for findings, and STATICALLY parses the
-rule files for the context attributes the JSON payload omits: severity, title,
-explanation, recommendation, references.
+TWO SOURCES, CLEAR PRECEDENCE
+  --format json is authoritative for everything about a FINDING: severity,
+  title, explanation, recommendation, references, affected_items_label. These
+  are all present in the JSON payload.
 
-Deliberately does NOT import the rule modules. Two reasons:
-  1. Rules import nac_validate (RuleBase, Violation), which is only present in
-     the interpreter nac-validate itself runs under - not necessarily the system
-     python3 that executes this script.
-  2. Importing executes module-level code. A rule with a startup consistency
-     guard would raise, and a reporting tool must never have side effects.
+  The rule files are parsed only to build the INVENTORY - which rules exist, in
+  which tier, and in which file. The JSON lists failing rules only, so without
+  this there is no way to report "12 of 16 rules passed", and no way to name the
+  file that needs an explanation added.
 
-ast.literal_eval on the class body gives every attribute we need, since they are
-all plain literals.
+  Rule files are parsed with ast, never imported. Importing would require
+  nac_validate to be present in this interpreter (it is not - nac-validate runs
+  in its own environment) and would execute module-level code, which a reporting
+  tool must never do.
 
 Usage:
   validate_summary.py REPORT.json --rules DIR [--rules DIR] [--exitcode N]
@@ -29,18 +30,15 @@ import sys
 SEVERITY_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
 SEVERITY_ICON = {"HIGH": "🔴", "MEDIUM": "🟠", "LOW": "🟡"}
 
-# Class attributes worth surfacing. Anything else in the rule body is ignored.
-ATTR_NAMES = frozenset({
-    "id", "description", "severity", "title", "explanation",
-    "recommendation", "affected_items_label", "references",
-})
+# Rule-file attributes worth reading for the inventory.
+ATTR_NAMES = frozenset({"id", "description", "severity"})
 
-# Cap per-rule findings so one broad rule cannot blow the 1 MiB step-summary
+# Cap per-rule findings so one broad rule cannot exhaust the 1 MiB step-summary
 # limit. The full list stays in the artifact and the job log.
 MAX_FINDINGS_PER_RULE = 25
 
-# Rules whose findings should lead the summary regardless of ID ordering.
-# Segmentation breaches are the headline finding; everything else is detail.
+# Rules whose findings lead the summary regardless of ID ordering. A
+# segmentation breach is the headline; naming and metadata are detail.
 PRIORITY_RULE_IDS = ("210",)
 
 
@@ -51,8 +49,8 @@ def esc_cell(text):
 
 def parse_rule_attrs(path):
     """
-    Extract the `Rule` class attributes from a rule file without importing it.
-    Returns a dict, or None if the file has no `Rule` class.
+    Read the `Rule` class attributes from a rule file without importing it.
+    Returns a dict, or None if there is no `Rule` class.
     """
     try:
         with open(path, encoding="utf-8") as fh:
@@ -66,11 +64,9 @@ def parse_rule_attrs(path):
 
         attrs = {}
         for stmt in node.body:
-            # Plain assignment: severity = "HIGH"
             if isinstance(stmt, ast.Assign):
                 targets = [t for t in stmt.targets if isinstance(t, ast.Name)]
                 value = stmt.value
-            # Annotated assignment: id: str = "101"
             elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
                 targets = [stmt.target]
                 value = stmt.value
@@ -85,21 +81,21 @@ def parse_rule_attrs(path):
                 try:
                     attrs[target.id] = ast.literal_eval(value)
                 except (ValueError, SyntaxError):
-                    # f-string or computed value - not a literal, skip it.
-                    pass
+                    pass  # computed value, not a literal
         return attrs
 
     return None
 
 
-def load_rule_metadata(rule_dirs):
+def load_inventory(rule_dirs):
     """
-    id -> metadata dict, plus a list of files that could not be read.
+    id -> {severity, description, tier, filename}, plus unreadable files.
 
-    A file that cannot be parsed is reported rather than raised: a rule that will
-    not load is itself worth surfacing, because it did not evaluate.
+    A file that cannot be parsed is reported rather than raised: it may still
+    have run inside nac-validate, so this is a reporting gap, not a validation
+    failure.
     """
-    meta = {}
+    inventory = {}
     problems = []
 
     for rule_dir in rule_dirs:
@@ -111,10 +107,9 @@ def load_rule_metadata(rule_dirs):
         for fname in sorted(os.listdir(rule_dir)):
             if not fname.endswith(".py") or fname.startswith("_"):
                 continue
-            path = os.path.join(rule_dir, fname)
 
             try:
-                attrs = parse_rule_attrs(path)
+                attrs = parse_rule_attrs(os.path.join(rule_dir, fname))
             except ValueError as exc:
                 problems.append((tier, fname, str(exc)))
                 continue
@@ -127,41 +122,31 @@ def load_rule_metadata(rule_dirs):
             if not rid:
                 problems.append((tier, fname, "Rule has no literal 'id'"))
                 continue
-
-            if rid in meta:
+            if rid in inventory:
                 problems.append((
                     tier, fname,
                     f"duplicate rule id '{rid}' - also declared by "
-                    f"{meta[rid]['tier']}/{meta[rid]['filename']}"
+                    f"{inventory[rid]['tier']}/{inventory[rid]['filename']}"
                 ))
 
-            refs = attrs.get("references") or []
-            if isinstance(refs, str):
-                refs = [refs]
-
-            meta[rid] = {
+            inventory[rid] = {
                 "severity": str(attrs.get("severity", "HIGH")).upper(),
                 "description": attrs.get("description", ""),
-                "title": attrs.get("title", ""),
-                "explanation": attrs.get("explanation", ""),
-                "recommendation": attrs.get("recommendation", ""),
-                "affected_items_label": attrs.get("affected_items_label",
-                                                  "Affected items"),
-                "references": list(refs),
                 "tier": tier,
                 "filename": fname,
             }
 
-    return meta, problems
+    return inventory, problems
 
 
 def normalise_error(err):
     """
     Return (path, message).
 
-    JSON errors are objects, not strings. Simple string-list rules produce
-    {"message": "..."}; structured rules using Violation add "path" and
-    "details". A bare string is also handled in case the format changes.
+    Structured rules set both `path` and `message`, and some also prefix the
+    message with the path - strip the duplicate so the bullet reads cleanly.
+    Simple string-list rules embed the path as a "path - message" prefix, which
+    is split out here.
     """
     if isinstance(err, dict):
         message = str(err.get("message", "")).strip()
@@ -170,10 +155,13 @@ def normalise_error(err):
         message = str(err).strip()
         path = ""
 
-    # Simple rules embed the path as a "path - message" prefix.
-    if not path and " - " in message:
+    if path and message.startswith(path):
+        message = message[len(path):].lstrip()
+        if message.startswith("-"):
+            message = message[1:].lstrip()
+    elif not path and " - " in message:
         candidate, _, rest = message.partition(" - ")
-        if " " not in candidate and candidate:
+        if candidate and " " not in candidate:
             path, message = candidate, rest
 
     return path, message
@@ -186,87 +174,87 @@ def block(text):
     return "\n".join(ln.rstrip() for ln in str(text).strip().splitlines())
 
 
-def sort_key(finding):
-    priority = 0 if finding["id"] in PRIORITY_RULE_IDS else 1
-    return (priority, SEVERITY_ORDER.get(finding["severity"], 9), finding["id"])
-
-
-def render(report, meta, problems, exitcode):
-    out = []
-    syntax = report.get("syntax_errors") or []
-    semantic = report.get("semantic_errors") or []
-
+def build_findings(semantic, inventory):
     findings = []
     for entry in semantic:
         rid = str(entry.get("rule_id", "?"))
-        info = meta.get(rid, {})
+        inv = inventory.get(rid, {})
         findings.append({
             "id": rid,
-            "description": entry.get("description") or info.get("description", ""),
+            # JSON is authoritative; the inventory only fills gaps.
+            "description": entry.get("description") or inv.get("description", ""),
+            "severity": str(entry.get("severity")
+                            or inv.get("severity", "HIGH")).upper(),
+            "title": entry.get("title", ""),
+            "explanation": entry.get("explanation", ""),
+            "recommendation": entry.get("recommendation", ""),
+            "affected_items_label": entry.get("affected_items_label")
+                                    or "Affected items",
+            "references": list(entry.get("references") or []),
             "errors": entry.get("errors") or [],
-            "meta": info,
-            "severity": info.get("severity", "HIGH"),
+            "tier": inv.get("tier", "unknown"),
+            "filename": inv.get("filename", "?"),
         })
-    findings.sort(key=sort_key)
+
+    findings.sort(key=lambda f: (
+        0 if f["id"] in PRIORITY_RULE_IDS else 1,
+        SEVERITY_ORDER.get(f["severity"], 9),
+        f["id"],
+    ))
+    return findings
+
+
+def render(report, inventory, problems, exitcode):
+    out = []
+    syntax = report.get("syntax_errors") or []
+    findings = build_findings(report.get("semantic_errors") or [], inventory)
 
     counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
     for f in findings:
         counts[f["severity"]] = counts.get(f["severity"], 0) + len(f["errors"])
     total = sum(counts.values())
 
-    out.append("# 1. Data model validation")
-    out.append("")
+    out += ["# 1. Data model validation", ""]
 
     if exitcode == 0:
-        out.append("## ✅ Passed")
-        out.append("")
-        out.append(f"All **{len(meta)}** rules satisfied across "
-                   f"{len({m['tier'] for m in meta.values()})} tier(s).")
+        tiers = len({i["tier"] for i in inventory.values()})
+        out += ["## ✅ Passed", "",
+                f"All **{len(inventory)}** rules satisfied across "
+                f"{tiers} tier(s)."]
     elif exitcode == 2:
-        out.append("## ❌ Syntax / schema validation failed")
-        out.append("")
-        out.append("The YAML could not be parsed or does not match the schema. "
-                   "Semantic rules were **not** evaluated.")
+        out += ["## ❌ Syntax / schema validation failed", "",
+                "The YAML could not be parsed or does not match the schema. "
+                "Semantic rules were **not** evaluated."]
     elif exitcode == 3:
-        out.append("## ❌ Configuration error")
-        out.append("")
-        out.append("nac-validate could not run - missing schema or invalid rule "
-                   "directory. **Nothing was validated.** Do not read this as a "
-                   "pass.")
+        out += ["## ❌ Configuration error", "",
+                "nac-validate could not run - missing schema or invalid rule "
+                "directory. **Nothing was validated.** Do not read this as a "
+                "pass."]
     else:
-        out.append(f"## ❌ {total} violation(s) - plan blocked")
-        out.append("")
-        out.append("Every violation blocks the pipeline regardless of severity. "
-                   "Severity indicates urgency, not whether the gate opens.")
+        out += [f"## ❌ {total} violation(s) - plan blocked", "",
+                "Every violation blocks the pipeline regardless of severity. "
+                "Severity indicates urgency, not whether the gate opens."]
     out.append("")
 
     if problems:
-        out.append("### ⚠️ Rules that could not be read")
-        out.append("")
-        out.append("Context for these rules is unavailable, so their findings "
-                   "below show without an explanation or fix.")
-        out.append("")
-        out.append("| tier | file | problem |")
-        out.append("| --- | --- | --- |")
+        out += ["### ⚠️ Rule files that could not be read", "",
+                "These files were not parsed for the inventory below. They may "
+                "still have run - check the raw output.", "",
+                "| tier | file | problem |", "| --- | --- | --- |"]
         for tier, fname, why in problems:
             out.append(f"| `{tier}` | `{fname}` | {esc_cell(why)} |")
         out.append("")
 
     if syntax:
-        out.append("### Syntax errors")
-        out.append("")
-        out.append("```text")
+        out += ["### Syntax errors", "", "```text"]
         for err in syntax[:MAX_FINDINGS_PER_RULE]:
-            _, message = normalise_error(err)
-            out.append(message)
+            out.append(normalise_error(err)[1])
         if len(syntax) > MAX_FINDINGS_PER_RULE:
             out.append(f"... {len(syntax) - MAX_FINDINGS_PER_RULE} more")
-        out.append("```")
-        out.append("")
+        out += ["```", ""]
 
     if total:
-        out.append("| severity | violations | rules |")
-        out.append("| --- | --- | --- |")
+        out += ["| severity | violations | rules |", "| --- | --- | --- |"]
         for sev in ("HIGH", "MEDIUM", "LOW"):
             if not counts.get(sev):
                 continue
@@ -276,30 +264,27 @@ def render(report, meta, problems, exitcode):
         out.append("")
 
     for f in findings:
-        info = f["meta"]
         icon = SEVERITY_ICON.get(f["severity"], "")
-        heading = info.get("title") or f["description"] or f"Rule {f['id']}"
-        tier = info.get("tier", "unknown")
+        heading = f["title"] or f["description"] or f"Rule {f['id']}"
 
-        out.append("---")
-        out.append("")
-        out.append(f"### {icon} `{f['id']}` {heading}")
-        out.append("")
-        out.append(f"**{f['severity']}** · `{tier}` · "
-                   f"{len(f['errors'])} violation(s)")
-        if info.get("title") and f["description"]:
-            out.append("")
-            out.append(f"_{f['description']}_")
-        out.append("")
+        out += ["---", "",
+                f"### {icon} `{f['id']}` {heading}", "",
+                f"**{f['severity']}** · `{f['tier']}` · "
+                f"{len(f['errors'])} violation(s)"]
+        if f["title"] and f["description"]:
+            out += ["", f"_{f['description']}_"]
+        out += ["", f"**{f['affected_items_label']}**", ""]
 
-        out.append(f"**{info.get('affected_items_label') or 'Affected items'}**")
-        out.append("")
         shown = f["errors"][:MAX_FINDINGS_PER_RULE]
         for err in shown:
             path, message = normalise_error(err)
-            if path:
-                out.append(f"- `{path}`")
+            if path and message:
+                # Two trailing spaces force a hard line break inside the bullet,
+                # so the path and message do not run together on one line.
+                out.append(f"- `{path}`  ")
                 out.append(f"  {message}")
+            elif path:
+                out.append(f"- `{path}`")
             else:
                 out.append(f"- {message}")
         if len(f["errors"]) > len(shown):
@@ -307,59 +292,45 @@ def render(report, meta, problems, exitcode):
                        f"raw output below_")
         out.append("")
 
-        why = block(info.get("explanation"))
+        why = block(f["explanation"])
         if why:
-            out.append("<details><summary>Why this matters</summary>")
-            out.append("")
-            out.append(why)
-            out.append("")
-            out.append("</details>")
-            out.append("")
+            out += ["<details><summary>Why this matters</summary>", "",
+                    why, "", "</details>", ""]
 
-        fix = block(info.get("recommendation"))
+        fix = block(f["recommendation"])
         if fix:
-            out.append("**How to fix**")
-            out.append("")
+            out += ["**How to fix**", ""]
             # An indented recommendation is almost always a YAML snippet.
             if any(ln.startswith(("  ", "\t")) for ln in fix.splitlines()):
-                out.append("```yaml")
-                out.append(fix)
-                out.append("```")
+                out += ["```yaml", fix, "```"]
             else:
                 out.append(fix)
             out.append("")
 
-        refs = info.get("references") or []
-        for ref in refs:
+        for ref in f["references"]:
             out.append(f"- [reference]({ref})")
-        if refs:
+        if f["references"]:
             out.append("")
 
         if not why and not fix:
-            out.append(f"> No `explanation` or `recommendation` set on this "
-                       f"rule. Add them to "
-                       f"`{tier}/{info.get('filename', '?')}` so this section "
-                       f"tells the reader what to do.")
-            out.append("")
+            out += [f"> This rule has no `explanation` or `recommendation`. "
+                    f"Add them to `{f['tier']}/{f['filename']}` so this section "
+                    f"tells the reader why it matters and how to fix it.", ""]
 
-    failed_ids = {f["id"] for f in findings}
-    passed = sorted((rid for rid in meta if rid not in failed_ids),
-                    key=lambda r: (meta[r]["tier"], r))
+    failed = {f["id"] for f in findings}
+    passed = sorted((rid for rid in inventory if rid not in failed),
+                    key=lambda r: (inventory[r]["tier"], r))
     if passed:
-        out.append("---")
-        out.append("")
-        out.append(f"<details><summary>{len(passed)} of {len(meta)} rules "
-                   f"passed</summary>")
-        out.append("")
-        out.append("| rule | tier | severity | check |")
-        out.append("| --- | --- | --- | --- |")
+        out += ["---", "",
+                f"<details><summary>{len(passed)} of {len(inventory)} rules "
+                f"passed</summary>", "",
+                "| rule | tier | severity | check |",
+                "| --- | --- | --- | --- |"]
         for rid in passed:
-            m = meta[rid]
-            out.append(f"| `{rid}` | {m['tier']} | {m['severity']} | "
-                       f"{esc_cell(m['description'])} |")
-        out.append("")
-        out.append("</details>")
-        out.append("")
+            i = inventory[rid]
+            out.append(f"| `{rid}` | {i['tier']} | {i['severity']} | "
+                       f"{esc_cell(i['description'])} |")
+        out += ["", "</details>", ""]
 
     return "\n".join(out)
 
@@ -383,8 +354,8 @@ def main():
               f"nac-validate exited **{args.exitcode}** - see the job log.")
         return 0
 
-    meta, problems = load_rule_metadata(args.rules)
-    print(render(report, meta, problems, args.exitcode))
+    inventory, problems = load_inventory(args.rules)
+    print(render(report, inventory, problems, args.exitcode))
     return 0
 
 

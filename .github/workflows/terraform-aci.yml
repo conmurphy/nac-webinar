@@ -605,13 +605,13 @@ jobs:
       - name: Approval context
         env:
           PLAN_SUMMARY:  ${{ needs.plan.outputs.summary }}
-          VAL_WARNINGS:  ${{ needs.validate.outputs.warnings }}
+          VAL_LOW:       ${{ needs.validate.outputs.low }}
           SCOPE:         ${{ needs.plan.outputs.changed_subnets }}
           COMMIT_SHA:    ${{ github.sha }}
           TRIGGERED_BY:  ${{ github.actor }}
         run: |
           echo "Approved plan     : ${PLAN_SUMMARY:-unknown}"
-          echo "Validation        : passed (${VAL_WARNINGS:-0} advisory warnings)"
+          echo "Validation        : passed (${VAL_LOW:-0} LOW findings)"
           echo "Post-deploy scope : ${SCOPE:-full sweep}"
           echo "Commit            : ${COMMIT_SHA}"
           echo "Triggered by      : ${TRIGGERED_BY}"
@@ -1050,6 +1050,7 @@ jobs:
           SKIPPED:       ${{ steps.nactest.outputs.skipped }}
           PLAN_SUMMARY:  ${{ needs.plan.outputs.summary }}
           VAL_WARNINGS:  ${{ needs.validate.outputs.warnings }}
+          VAL_LOW:       ${{ needs.validate.outputs.low }}
           PAGES_STAGED:  ${{ steps.pages.outputs.published }}
           PAGES_DEPLOY:  ${{ steps.deploy.outcome }}
           RUN_URL:       ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -1063,7 +1064,7 @@ jobs:
             echo ''
             echo "Plan applied: **${PLAN_SUMMARY:-unknown}**"
             echo ''
-            echo "Pre-deploy validation: passed (${VAL_WARNINGS:-0} advisory warnings)"
+            echo "Pre-deploy validation: passed (${VAL_LOW:-0} LOW findings)"
             echo ''
             echo '---'
             echo ''
