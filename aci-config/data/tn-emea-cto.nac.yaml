@@ -11,27 +11,27 @@ apic:
         # - name: vrf-external
           
       bridge_domains:
-        - name: app-02-web
-          alias: 192.168.2.0_24
-          vrf: vrf-external
-          subnets:
-          - ip: 192.168.2.1/24
-            public: true
-          l3outs:
-          - l3out-to-core-01
-        # - name: app-02-db # duplicate
+        # - name: 192.168.215.64_26
+        #   alias: app-02-web
+        #   vrf: vrf-external
+        #   subnets:
+        #   - ip: 198.18.215.65/26
+        #     public: false
+        #   l3outs:
+        #   - l3out-to-core-01
+        # - name: app-02-db
         #   alias: 192.168.215.128_26
         #   vrf: vrf-external
         #   subnets:
         #   - ip: 198.18.215.65/26
-        # - name: app-02-web
-        #   alias: 198.18.215.128_26 
-        #   vrf: vrf-external
-        #   subnets:
-        #   - ip: 198.18.215.129/26
-        #     public: true
-        #   l3outs:
-        #   - l3out-to-core-01
+        - name: app-02-web
+          alias: 198.18.215.128_26 
+          vrf: vrf-external
+          subnets:
+          - ip: 198.18.215.129/26
+            public: true
+          l3outs:
+          - l3out-to-core-01
 
 
       application_profiles:
@@ -41,10 +41,6 @@ apic:
             - name: all-services
               vrf: vrf-external
               epg_selectors:
-                - endpoint_group: 198.18.215.0_26 
-                  application_profile: network-segments
-                - endpoint_group: 198.18.215.64_26 
-                  application_profile: network-segments
                 - endpoint_group: 198.18.215.128_26 
                   application_profile: network-segments
               
@@ -55,71 +51,12 @@ apic:
         - name: network-segments
           managed: false
           endpoint_groups: 
-            - name: 198.18.215.0_26 # nac-webinar
-              bridge_domain: 198.18.215.0_26 
-              physical_domains:
-                - emea-cto.phys-dom
-              static_ports:
-                - node_id: 1101
-                  node2_id: 1102
-                  channel: vpc-ucs-test-01-6536-A
-                  vlan: 1228
-                  deployment_immediacy: immediate
-                - node_id: 1101
-                  node2_id: 1102
-                  channel: vpc-ucs-test-01-6536-B
-                  vlan: 1228
-                  deployment_immediacy: immediate
-                - node_id: 1101
-                  node2_id: 1102
-                  channel: vpc-ucs-prod-01-6454-A
-                  vlan: 1228
-                  deployment_immediacy: immediate
-                - node_id: 1101
-                  node2_id: 1102
-                  channel: vpc-ucs-prod-01-6454-B
-                  vlan: 1228
-                  deployment_immediacy: immediate
-            - name: 198.18.215.64_26 # nac-webinar
-              bridge_domain: 198.18.215.64_26 
-              physical_domains:
-                - emea-cto.phys-dom
-              static_ports:
-                - node_id: 1101
-                  node2_id: 1102
-                  channel: vpc-ucs-test-01-6536-A
-                  vlan: 1229
-                  deployment_immediacy: immediate
-                - node_id: 1101
-                  node2_id: 1102
-                  channel: vpc-ucs-test-01-6536-B
-                  vlan: 1229
-                  deployment_immediacy: immediate
-                - node_id: 1101
-                  node2_id: 1102
-                  channel: vpc-ucs-prod-01-6454-A
-                  vlan: 1229
-                  deployment_immediacy: immediate
-                - node_id: 1101
-                  node2_id: 1102
-                  channel: vpc-ucs-prod-01-6454-B
-                  vlan: 1229
-                  deployment_immediacy: immediate
-            - name: 198.18.215.128_26 # nac-webinar
+            - name: 198.18.215.128_26
               bridge_domain: 198.18.215.128_26 
+              alias: app-02-web
               physical_domains:
                 - emea-cto.phys-dom
               static_ports:
-                - node_id: 1101
-                  node2_id: 1102
-                  channel: vpc-ucs-test-01-6536-A
-                  vlan: 1230
-                  deployment_immediacy: immediate
-                - node_id: 1101
-                  node2_id: 1102
-                  channel: vpc-ucs-test-01-6536-B
-                  vlan: 1230
-                  deployment_immediacy: immediate
                 # - node_id: 1101
                 #   node2_id: 1102
                 #   channel: vpc-ucs-prod-01-6454-A
@@ -130,6 +67,16 @@ apic:
                 #   channel: vpc-ucs-prod-01-6454-B
                 #   vlan: 1230
                 #   deployment_immediacy: immediate
+                - node_id: 1101
+                  node2_id: 1102
+                  channel: vpc-ucs-test-01-6536-A
+                  vlan: 1230
+                  deployment_immediacy: immediate
+                - node_id: 1101
+                  node2_id: 1102
+                  channel: vpc-ucs-test-01-6536-B
+                  vlan: 1230
+                  deployment_immediacy: immediate
 
       filters:
         - name: icmp
