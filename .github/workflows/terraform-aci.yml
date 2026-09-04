@@ -44,9 +44,9 @@ env:
   # This cluster advertises LDAP and local; the CLI default DefaultAuth 401s.
   ND_DOMAIN: local
   # Pre-change gate. 'critical,major' makes ND block the apply on exit 3.
-  ND_FAIL_ON: '' #'critical,major'
+  ND_FAIL_ON: 'critical,major' # ''
   # Post-change delta reports the same severities but never blocks (step exits 0).
-  ND_DELTA_FAIL_ON: '' #'critical,major'
+  ND_DELTA_FAIL_ON: 'critical,major' #''
   ND_JOB_TIMEOUT_MINUTES: '30'
   ND_POLL_INTERVAL: '15'
   # Fallback only. The real link is read from the report's prechange_ui_url.
@@ -334,9 +334,9 @@ jobs:
           # 'analyze' is the dispatch-time default.
           # On push the input is unset, and 'latest' keeps the pipeline fast -
           # a fresh analysis adds 10-15 min
-          BASELINE_STRATEGY: ${{ github.event.inputs.baseline || 'analyze' }}
+          BASELINE_STRATEGY: ${{ github.event.inputs.baseline || 'latest' }}
         run: |
-          strategy="${BASELINE_STRATEGY:analyze}"
+          strategy="${BASELINE_STRATEGY:latest}"
           echo "baseline strategy: ${strategy}"
 
           set +e
