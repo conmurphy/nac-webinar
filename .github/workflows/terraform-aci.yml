@@ -515,23 +515,37 @@ jobs:
 # ══════════════════════════════════════════════════════════
   # JOB 3 — PR report
   #
-  # One sticky comment covering validation and plan, updated in place on every
-  # commit rather than appended. Owns all PR commenting so validate and plan can
+  # One sticky comment covering validation and plan, edited in place on every
+  # commit rather than appended. Owns all PR commenting, so validate and plan
   # stay on contents:read.
+  #
+  # Body generation lives in .github/scripts/pr_comment.py; the github-script
+  # step only performs the upsert. Keeps shell-continuation backslashes out of
+  # the YAML -> JavaScript boundary, which is where they break.
   # ══════════════════════════════════════════════════════════
   report:
     name: PR report
     needs: [validate, plan]
     # always(): a validation failure skips the plan job entirely, and that is
-    # precisely when the reviewer most needs the comment.
+    # exactly when the reviewer most needs this comment.
     if: always() && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
     steps:
-      # continue-on-error: the artifact does not exist when its job was skipped
-      # or failed early. The report degrades rather than failing.
+      # MUST come before the artifact downloads. actions/checkout cleans the
+      # workspace by default, so checking out afterwards would delete them.
+      # Sparse checkout because only the renderer is needed here.
+      - name: Checkout report script
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+
+      # continue-on-error: the artifact will not exist when its job was skipped
+      # or failed before uploading. The report degrades instead of failing.
       - name: Download validation report
         continue-on-error: true
         uses: actions/download-artifact@v4
@@ -547,10 +561,13 @@ jobs:
           path: reports/plan
 
       - name: Show what was downloaded
-        run: find reports -type f 2>/dev/null | sort || echo "(no artifacts)"
+        run: |
+          echo '--- script ---'
+          ls -l .github/scripts/ || echo "(script missing)"
+          echo '--- artifacts ---'
+          find reports -type f 2>/dev/null | sort || echo "(none)"
 
-      - name: Post or update PR comment
-        uses: actions/github-script@v7
+      - name: Render PR comment
         env:
           VALIDATE_RESULT: ${{ needs.validate.result }}
           PLAN_RESULT:     ${{ needs.plan.result }}
@@ -561,152 +578,40 @@ jobs:
           VAL_LOW:         ${{ needs.validate.outputs.low }}
           SCOPE:           ${{ needs.plan.outputs.changed_subnets }}
           RUN_URL:         ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # On a pull_request event github.sha is the ephemeral merge commit,
+          # which is not in the branch history and means nothing to a reviewer.
+          HEAD_SHA:        ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 .github/scripts/pr_comment.py \
+            --validate-dir reports/validate \
+            --plan-dir reports/plan \
+            > pr-comment.md
+          echo "--- first 40 lines ---"
+          head -40 pr-comment.md
+
+      - name: Post or update PR comment
+        uses: actions/github-script@v8
         with:
           script: |
             const fs = require('fs');
 
-            // Hidden marker used to find this comment on later runs so it is
-            // edited in place. Without it, a ten-commit PR ends up with ten
-            // near-identical comments.
+            // Must match --marker in pr_comment.py. The hidden HTML comment is
+            // how this run finds the comment left by the previous one; without
+            // it a ten-commit PR accumulates ten near-identical comments.
             const MARKER = '<!-- aci-nac-report -->';
-            const GH_COMMENT_LIMIT = 65536;
 
-            // upload-artifact v4 strips the common path prefix, so a file
-            // uploaded as aci-config/tfplan.txt may land either flattened or
-            // nested depending on what else was in the artifact.
-            const read = (...candidates) => {
-              for (const p of candidates) {
-                try {
-                  const s = fs.readFileSync(p, 'utf8');
-                  if (s.trim()) return s;
-                } catch { /* try the next candidate */ }
-              }
-              return '';
-            };
-
-            const valSummary = read('reports/validate/validate-summary.md');
-            const valRaw     = read('reports/validate/validate-all.txt');
-            const planTable  = read('reports/plan/plan-summary.md',
-                                    'reports/plan/aci-config/plan-summary.md');
-            const planRaw    = read('reports/plan/tfplan.txt',
-                                    'reports/plan/aci-config/tfplan.txt');
-
-            const valResult   = process.env.VALIDATE_RESULT || 'unknown';
-            const planResult  = process.env.PLAN_RESULT || 'skipped';
-            const planExit    = process.env.PLAN_EXITCODE || '';
-            const planLine    = process.env.PLAN_SUMMARY || 'unknown';
-            const high        = process.env.VAL_HIGH || '0';
-            const medium      = process.env.VAL_MEDIUM || '0';
-            const low         = process.env.VAL_LOW || '0';
-            const scope       = process.env.SCOPE || '';
-            const runUrl      = process.env.RUN_URL;
-
-            // ---- headline verdict -------------------------------------------
-            let verdict, next;
-            if (valResult !== 'success') {
-              verdict = '## ❌ Blocked at data model validation';
-              next = 'Fix the violations below and push again. No Terraform ' +
-                     'plan was produced, so there is nothing to review yet.';
-            } else if (planResult !== 'success') {
-              verdict = '## ❌ Validation passed, Terraform plan failed';
-              next = `Validation is clean but the plan did not complete. ` +
-                     `See the [job logs](${runUrl}).`;
-            } else if (planExit === '0') {
-              verdict = '## ✅ Validation passed · no infrastructure changes';
-              next = 'Safe to merge. The apply job will be skipped because the ' +
-                     'plan is empty.';
-            } else if (planExit === '2') {
-              verdict = '## ✅ Validation passed · changes ready to apply';
-              next = 'Merging this PR runs validation and the plan again against ' +
-                     '`main`, then holds the apply for environment approval ' +
-                     'before touching APIC.';
-            } else {
-              verdict = '## ⚠️ Plan finished in an unexpected state';
-              next = `Terraform exited ${planExit}. Review before merging.`;
+            let body;
+            try {
+              body = fs.readFileSync('pr-comment.md', 'utf8');
+            } catch (err) {
+              body = `${MARKER}\n# ACI Network as Code — change review\n\n` +
+                `⚠️ The report renderer failed (\`${err.message}\`). ` +
+                `See the [run](${process.env.RUN_URL || ''}) for job results.`;
+            }
+            if (!body.includes(MARKER)) {
+              body = `${MARKER}\n${body}`;
             }
 
-            const parts = [
-              MARKER,
-              '# ACI Network as Code — change review',
-              '',
-              verdict,
-              '',
-              '| gate | result | detail |',
-              '| --- | --- | --- |',
-              `| 1. Data model validation | ${valResult === 'success' ? '✅ passed' : '❌ failed'} | ` +
-                `${high} HIGH · ${medium} MEDIUM · ${low} LOW |`,
-              `| 2. Terraform plan | ${planResult === 'success' ? (planExit === '2' ? '⚠️ changes' : '✅ no changes') : (planResult === 'skipped' ? '⏭️ skipped' : '❌ failed')} | ` +
-                `\`${planLine}\` |`,
-              `| 3. Apply to APIC | ⏸️ on merge | requires approval |`,
-              '',
-              `**What happens next:** ${next}`,
-              '',
-              '---',
-              ''
-            ];
-
-            // ---- validation detail ------------------------------------------
-            if (valSummary.trim()) {
-              // Already rendered markdown; drop its own H1 so this comment has
-              // a single title.
-              parts.push(valSummary.replace(/^# .*\n/, '').trim());
-            } else if (valRaw.trim()) {
-              parts.push('## 1. Data model validation', '', '```text',
-                         valRaw.slice(0, 20000), '```');
-            } else {
-              parts.push('## 1. Data model validation', '',
-                         '_No validation report was produced._');
-            }
-            parts.push('', '---', '');
-
-            // ---- plan detail -------------------------------------------------
-            parts.push('## 2. Terraform plan', '');
-            if (planResult === 'skipped') {
-              parts.push('_Skipped: validation must pass first._');
-            } else {
-              parts.push('`' + planLine + '`', '');
-              if (planTable.trim()) parts.push(planTable.trim(), '');
-              parts.push('**Post-deploy test scope:** `' +
-                         (scope || 'all configured subnets (full sweep)') + '`', '');
-              if (planRaw.trim()) {
-                parts.push('<details><summary>Raw terraform plan</summary>', '',
-                           '```hcl', planRaw.trim(), '```', '</details>');
-              }
-            }
-
-            parts.push('', '---', '',
-              '<sub>Reproduce validation locally:</sub>',
-              '',
-              '```bash',
-              'nac-validate \',
-              '  -s tests-and-validations/01-pre-deploy-validation-rules/schemas/apic_schema.yaml \',
-              '  -r tests-and-validations/01-pre-deploy-validation-rules/rules/local-rules \',
-              '  -r tests-and-validations/01-pre-deploy-validation-rules/rules/pipeline-rules \',
-              '  aci-config/data',
-              '```',
-              '',
-              `<sub>[Full run and step summary](${runUrl}) · commit \`${context.sha.slice(0, 7)}\`</sub>`
-            );
-
-            let body = parts.join('\n');
-
-            // Trim the raw plan first - it is the largest and least essential
-            // block, and the verdict must survive truncation.
-            if (body.length > GH_COMMENT_LIMIT) {
-              const marker = '<details><summary>Raw terraform plan</summary>';
-              const idx = body.indexOf(marker);
-              if (idx > 0) {
-                body = body.slice(0, idx) +
-                  `_Raw plan omitted (comment size limit). See the ` +
-                  `[job summary](${runUrl})._\n`;
-              }
-            }
-            if (body.length > GH_COMMENT_LIMIT) {
-              body = body.slice(0, GH_COMMENT_LIMIT - 200) +
-                `\n\n_... truncated. See the [job summary](${runUrl})._`;
-            }
-
-            // ---- upsert ------------------------------------------------------
             const { data: comments } = await github.rest.issues.listComments({
               issue_number: context.issue.number,
               owner: context.repo.owner,
@@ -724,14 +629,23 @@ jobs:
               });
               core.info(`updated comment ${existing.id}`);
             } else {
-              await github.rest.issues.createComment({
+              const { data: created } = await github.rest.issues.createComment({
                 issue_number: context.issue.number,
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 body,
               });
-              core.info('created a new comment');
+              core.info(`created comment ${created.id}`);
             }
+
+      - name: Upload rendered comment
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-comment
+          path: pr-comment.md
+          retention-days: 5
+          if-no-files-found: warn
 
 # ══════════════════════════════════════════════════════════
   # JOB 4 — Apply + post-change verification
