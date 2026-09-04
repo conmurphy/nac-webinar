@@ -34,7 +34,7 @@ env:
   TF_STATE_SCHEMA: aci_nac
   TF_DATA_DIR: /home/runner/_work/_tfdata/aci-config
   TF_PLUGIN_CACHE_DIR: /home/runner/_work/_tfcache
-   # ---- nac-validate ----
+  # ---- nac-validate ----
   # Two tiers. local-rules is what the pre-commit hook runs on a laptop:
   # self-consistency checks with a zero false-positive budget. pipeline-rules
   # adds organisational policy (allocations, segmentation, metadata,
@@ -43,8 +43,8 @@ env:
   # The pipeline runs BOTH. Passing only pipeline-rules would silently stop
   # gating prod on every local-tier rule.
   NAC_VALIDATE_DIR: tests-and-validations/01-pre-deploy-validation-rules
-  NAC_VALIDATE_LOCAL_RULES: tests-and-validations/01-pre-deploy-validation-rules/local-rules
-  NAC_VALIDATE_PIPELINE_RULES: tests-and-validations/01-pre-deploy-validation-rules/pipeline-rules
+  NAC_VALIDATE_LOCAL_RULES: tests-and-validations/01-pre-deploy-validation-rules/rules/local-rules
+  NAC_VALIDATE_PIPELINE_RULES: tests-and-validations/01-pre-deploy-validation-rules/rules/pipeline-rules
   NAC_VALIDATE_SCHEMA: tests-and-validations/01-pre-deploy-validation-rules/schemas/apic_schema.yaml
   # ---- nac-test ----
   NAC_TEST_DIR: tests-and-validations/02-post-deploy-tests
@@ -93,6 +93,18 @@ jobs:
   # integrity). Deliberately has no APIC or ND credentials: this job answers
   # "is the intent correct?", not "what will change?".
   # ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════
+  # JOB 1 — Validate data model (fast gate, no fabric access)
+  #
+  # Runs BOTH tiers: local-rules (what the pre-commit hook runs - self
+  # consistency, zero false-positive budget) plus pipeline-rules
+  # (organisational policy: allocations, segmentation, metadata, referential
+  # integrity). Passing only pipeline-rules would silently stop gating prod on
+  # every local-tier rule.
+  #
+  # Deliberately has no APIC or ND credentials: this job answers "is the intent
+  # correct?", not "what will change?".
+  # ══════════════════════════════════════════════════════════
   validate:
     name: Validate data model
     runs-on: [self-hosted, openshift, aci]
@@ -101,43 +113,67 @@ jobs:
       pull-requests: write
     outputs:
       exitcode: ${{ steps.validate.outputs.exitcode }}
-      errors:   ${{ steps.validate.outputs.errors }}
-      warnings: ${{ steps.validate.outputs.warnings }}
+      high:     ${{ steps.validate.outputs.high }}
+      medium:   ${{ steps.validate.outputs.medium }}
+      low:      ${{ steps.validate.outputs.low }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Verify tools
+      - name: Verify tools and rule discovery
         run: |
-          nac-validate --version || true
           python3 --version
-          echo "rules:"
-          ls -1 "${NAC_VALIDATE_RULES}"/rule_*.py | sed 's|.*/|  |'
+          command -v nac-validate || { echo "::error::nac-validate not on PATH"; exit 1; }
+
+          # Fail here rather than inside the validate step: an empty rule
+          # directory makes nac-validate exit 0, which looks identical to a pass.
+          for d in "${NAC_VALIDATE_LOCAL_RULES}" "${NAC_VALIDATE_PIPELINE_RULES}"; do
+            if [ ! -d "$d" ]; then
+              echo "::error::rule directory not found: $d"
+              exit 1
+            fi
+            n=$(find "$d" -maxdepth 1 -name '*.py' | wc -l)
+            echo "$d  ($n rule file(s))"
+            find "$d" -maxdepth 1 -name '*.py' -printf '    %f\n' | sort
+            if [ "$n" = "0" ]; then
+              echo "::error::no rule files in $d - validation would pass vacuously"
+              exit 1
+            fi
+          done
 
       - name: Show data model files
         run: |
           find "${WORKING_DIR}/data" -type f \( -name '*.yaml' -o -name '*.yml' \) \
             | sort | sed 's|^|  |'
 
-      # nac-validate exits non-zero on any HIGH/ERROR result. Captured rather
-      # than allowed to abort so the summary and PR comment are always written
+      # Invocation matches the form proven on the command line: the data path is
+      # POSITIONAL. -d is a nac-test flag and is rejected here.
+      #
+      # Output is captured rather than allowed to abort so the summary and PR
+      # comment are always written - a validation failure with no explanation is
+      # worse than the failure.
       - name: nac-validate
         id: validate
         run: |
-          echo "local rules:"
-          ls -1 "${NAC_VALIDATE_LOCAL_RULES}"/*.py | sed 's|.*/|  |'
-          echo "pipeline rules:"
-          ls -1 "${NAC_VALIDATE_PIPELINE_RULES}"/*.py | sed 's|.*/|  |'
+          # Schema is optional: passed only when the file exists, so a missing
+          # or renamed schema degrades to rule-only validation instead of an
+          # unhelpful CLI error.
+          SCHEMA_ARG=()
+          if [ -f "${NAC_VALIDATE_SCHEMA}" ]; then
+            SCHEMA_ARG=(-s "${NAC_VALIDATE_SCHEMA}")
+            echo "schema: ${NAC_VALIDATE_SCHEMA}"
+          else
+            echo "::warning::schema not found at ${NAC_VALIDATE_SCHEMA} - running rules only"
+          fi
 
           set +e
           nac-validate \
-            -d "${WORKING_DIR}/data" \
-            -s "${NAC_VALIDATE_SCHEMA}" \
+            "${SCHEMA_ARG[@]}" \
             -r "${NAC_VALIDATE_LOCAL_RULES}" \
             -r "${NAC_VALIDATE_PIPELINE_RULES}" \
-            --non-strict \
+            "${WORKING_DIR}/data" \
             > validate.out 2> validate.err
           code=$?
           set -e
@@ -147,17 +183,45 @@ jobs:
           cat validate.out || true
           echo '--- nac-validate stderr ---'
           cat validate.err || true
-
           cat validate.out validate.err > validate-all.txt 2>/dev/null || true
 
-          errs=$(grep -c -iE '^(ERROR|HIGH)' validate-all.txt || true)
-          warns=$(grep -c -iE '^(WARNING|MEDIUM|LOW)' validate-all.txt || true)
-          echo "errors=${errs:-0}"    >> "$GITHUB_OUTPUT"
-          echo "warnings=${warns:-0}" >> "$GITHUB_OUTPUT"
-          echo "validation: ${errs:-0} error(s), ${warns:-0} warning(s), exit ${code}"
+          # A Python exception in a rule file means that rule did not run. For a
+          # segmentation rule that is indistinguishable from a pass, so surface
+          # it explicitly.
+          if grep -q 'Traceback (most recent call last)' validate-all.txt; then
+            echo "::error::a rule raised an exception - it did NOT evaluate. Treat this as a failure, not a pass."
+          fi
+
+          # Severity tallies. nac-validate reports these in its summary block as
+          #     • 3 HIGH severity violations (rules: 101, 04, 403)
+          # i.e. indented and bulleted, so a '^'-anchored grep never matches.
+          sev_count() {
+            awk -v want="$1" '
+              {
+                line = $0
+                while (match(line, /[0-9]+ [A-Z]+ severity/)) {
+                  chunk = substr(line, RSTART, RLENGTH)
+                  split(chunk, f, " ")
+                  if (f[2] == want) total += f[1]
+                  line = substr(line, RSTART + RLENGTH)
+                }
+              }
+              END { print total + 0 }
+            ' validate-all.txt
+          }
+
+          high=$(sev_count HIGH)
+          med=$(sev_count MEDIUM)
+          low=$(sev_count LOW)
+          {
+            echo "high=${high}"
+            echo "medium=${med}"
+            echo "low=${low}"
+          } >> "$GITHUB_OUTPUT"
+          echo "violations - HIGH:${high} MEDIUM:${med} LOW:${low} (exit ${code})"
 
           if [ "$code" != "0" ]; then
-            echo "::error::Data model validation failed - fix the findings before this change can be planned"
+            echo "::error::Data model validation failed (${high} HIGH) - fix the findings before this change can be planned"
           fi
           exit "$code"
 
@@ -165,31 +229,48 @@ jobs:
         if: always()
         env:
           EXITCODE: ${{ steps.validate.outputs.exitcode }}
-          ERRORS:   ${{ steps.validate.outputs.errors }}
-          WARNINGS: ${{ steps.validate.outputs.warnings }}
+          HIGH:     ${{ steps.validate.outputs.high }}
+          MEDIUM:   ${{ steps.validate.outputs.medium }}
+          LOW:      ${{ steps.validate.outputs.low }}
         run: |
           set -uo pipefail
           {
             echo '# 1. Data model validation (nac-validate)'
             echo ''
             if [ "${EXITCODE:-1}" = "0" ]; then
-              echo "✅ **Data model is valid.** ${WARNINGS:-0} advisory warning(s)."
+              echo "✅ **Data model is valid.** ${LOW:-0} advisory finding(s)."
             else
-              echo "❌ **${ERRORS:-0} error(s) found.** The plan will not run until these are fixed."
+              echo "❌ **${HIGH:-0} HIGH severity violation(s).** The plan will not run until these are fixed."
             fi
             echo ''
-            echo 'Checks applied:'
-            printf '%s\n' \
-              '- Subnets inside each tenant allocated range' \
-              '- BD name matches the subnet it carries' \
-              '- EPG naming convention' \
-              '- Static paths restricted to permitted UCS domains (prod only)' \
-              '- Every EPG has a static path' \
-              '- No duplicate or overlapping subnets anywhere in the repo' \
-              '- Cross-references resolve (BD to VRF, BD to L3Out, EPG to BD, contracts)' \
-              '- VRF enforcement and contract scope' \
-              '- Descriptions and aliases (advisory)'
+            echo '| severity | violations |'
+            echo '| --- | --- |'
+            echo "| HIGH | ${HIGH:-0} |"
+            echo "| MEDIUM | ${MEDIUM:-0} |"
+            echo "| LOW | ${LOW:-0} |"
             echo ''
+
+            # Generated from the rule files rather than hand-maintained, so the
+            # list cannot drift as rules are added, renamed or retiered.
+            echo '<details><summary>Rules applied</summary>'
+            echo ''
+            for tier in "local:${NAC_VALIDATE_LOCAL_RULES}" "pipeline:${NAC_VALIDATE_PIPELINE_RULES}"; do
+              label="${tier%%:*}"
+              dir="${tier#*:}"
+              echo "**${label} tier**"
+              echo ''
+              for f in "${dir}"/*.py; do
+                [ -f "$f" ] || continue
+                base="$(basename "$f" .py)"
+                rid="${base%%_*}"
+                name="$(printf '%s' "${base#*_}" | tr '_' ' ')"
+                printf -- '- `%s` %s\n' "$rid" "$name"
+              done
+              echo ''
+            done
+            echo '</details>'
+            echo ''
+
             if [ -s validate-all.txt ]; then
               echo '<details><summary>Full validation output</summary>'
               echo ''
@@ -217,7 +298,7 @@ jobs:
         if: failure() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         env:
-          ERRORS: ${{ steps.validate.outputs.errors }}
+          HIGH: ${{ steps.validate.outputs.high }}
         with:
           script: |
             const fs = require('fs');
@@ -227,17 +308,16 @@ jobs:
             const body = [
               '## ❌ Data model validation failed',
               '',
-              `${process.env.ERRORS || '?'} error(s) found by \`nac-validate\`.`,
+              `${process.env.HIGH || '?'} HIGH severity violation(s) found by \`nac-validate\`.`,
               'No Terraform plan was produced.',
               '',
               'Reproduce locally:',
               '',
               '```bash',
               'nac-validate \',
-              '  -d aci-config/data \',
-              '  -s tests-and-validations/01-pre-deploy-validation-rules/schemas/apic_schema.yaml \',
-              '  -r tests-and-validations/01-pre-deploy-validation-rules/local-rules \',
-              '  -r tests-and-validations/01-pre-deploy-validation-rules/pipeline-rules',
+              '  -r tests-and-validations/01-pre-deploy-validation-rules/rules/local-rules \',
+              '  -r tests-and-validations/01-pre-deploy-validation-rules/rules/pipeline-rules \',
+              '  aci-config/data',
               '```',
               '',
               '<details><summary>Findings</summary>',
@@ -612,19 +692,22 @@ jobs:
           ACI_INSECURE: 'true'
 
       # ═══════════════ Post-apply: re-validate against reality ═══════════════
-      # Cheap and catches the case where the apply partially succeeded: the YAML
-      # is still valid, so any failure here means the data model changed between
-      # plan and apply rather than the model being wrong.
+      # Cheap, and catches the case where the data model shifted between plan and
+      # apply. Advisory only - the change is already on the fabric by this point,
+      # so failing the job here would be theatre.
       - name: nac-validate (post-apply intent re-check)
         continue-on-error: true
         working-directory: .
         run: |
+          SCHEMA_ARG=()
+          [ -f "${NAC_VALIDATE_SCHEMA}" ] && SCHEMA_ARG=(-s "${NAC_VALIDATE_SCHEMA}")
+
           set +e
           nac-validate \
-            -d "${WORKING_DIR}/data" \
-            -s "${NAC_VALIDATE_SCHEMA}" \
-            -r "${NAC_VALIDATE_RULES}" \
-            --non-strict
+            "${SCHEMA_ARG[@]}" \
+            -r "${NAC_VALIDATE_LOCAL_RULES}" \
+            -r "${NAC_VALIDATE_PIPELINE_RULES}" \
+            "${WORKING_DIR}/data"
           code=$?
           set -e
           if [ "$code" != "0" ]; then

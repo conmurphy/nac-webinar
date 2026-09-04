@@ -16,7 +16,6 @@ MAINTENANCE
     grep for 'DUPLICATED-IN' to find every copy before editing.
 """
 
-# DUPLICATED-IN: 06_static_port_domain_coverage.py
 UCS_DOMAIN_PATHS = {
     "prod": [
         "vpc-ucs-prod-01-6454-A",

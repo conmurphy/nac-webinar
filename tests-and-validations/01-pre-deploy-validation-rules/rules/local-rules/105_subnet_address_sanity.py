@@ -21,7 +21,7 @@ MIN_USABLE_PREFIX = 30
 
 
 class Rule:
-    id = "104"
+    id = "105"
     description = "BD subnet gateway must be a usable host address"
     severity = "HIGH"
 
