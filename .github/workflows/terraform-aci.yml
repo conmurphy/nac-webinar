@@ -24,11 +24,24 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'Terraform action'
+        description: 'What to run'
         required: true
         default: 'plan'
         type: choice
-        options: [plan, apply]
+        options:
+          - plan          # validate + plan only
+          - apply         # validate + plan + apply + test
+          - test          # post-deploy tests ONLY, against the fabric as it is
+      include_tags:
+        description: 'test only: Robot tag expression, e.g. ucs-domain or fabric-icmp. Blank runs the full change-verification set.'
+        required: false
+        default: ''
+        type: string
+      changed_subnets:
+        description: 'test only: comma-separated subnet CIDRs to scope ICMP tests to. Blank runs a full sweep.'
+        required: false
+        default: ''
+        type: string
 
 # Plan runs are per-ref and cancellable: a newer commit supersedes an in-flight
 # plan for the same PR. Merges to main share one group and are never cancelled,
@@ -122,6 +135,9 @@ jobs:
   # ══════════════════════════════════════════════════════════
   validate:
     name: Validate data model
+    # A test-only dispatch verifies the fabric as it stands - there is no
+    # proposed change to validate, so skip straight to the test job.
+    if: "!(github.event_name == 'workflow_dispatch' && inputs.action == 'test')"
     runs-on: [self-hosted, openshift, aci]
     permissions:
       contents: read
@@ -305,6 +321,7 @@ jobs:
   plan:
     name: Terraform Plan
     needs: validate
+    if: "!(github.event_name == 'workflow_dispatch' && inputs.action == 'test')"
     runs-on: [self-hosted, openshift, aci]
     environment: aci-tenant-emea-cto-plan
     permissions:
@@ -692,28 +709,17 @@ jobs:
           retention-days: 5
           if-no-files-found: warn
 
-# ══════════════════════════════════════════════════════════
-  # JOB 4 — Apply + post-change verification
+  # ══════════════════════════════════════════════════════════
+  # JOB 4 — Apply to APIC
   # main only, blocks on required reviewers.
   #
-  # NFS NOTE: multi-line step bodies are wrapped in `{ ... }` so bash reads the
-  # whole script before executing - see the note on the plan job. This matters
-  # most here: `terraform apply` is the longest-running command in the workflow
-  # and the most expensive to have interrupted after it has already changed the
-  # fabric.
-  #
-  # The apply step is deliberately NOT retried. A partial apply needs a human
-  # deciding what to do next, not a loop.
+  # Post-deploy verification is a SEPARATE job (see 'test' below) so it can be
+  # run standalone via workflow_dispatch without pushing a config change purely
+  # to trigger it. This job now does one thing: change the fabric.
   # ══════════════════════════════════════════════════════════
   apply:
     name: Apply to APIC
     needs: [validate, plan]
-    # Apply only on a merge to main (a push to main IS a merged PR) or an
-    # explicit manual dispatch. Never on a pull_request event, so a PR can
-    # never reach APIC no matter what it contains.
-    #
-    # Branch protection is what guarantees a push to main came from a reviewed
-    # PR - this condition alone does not prevent a direct push.
     if: |
       needs.validate.result == 'success' &&
       needs.plan.result == 'success' &&
@@ -724,10 +730,12 @@ jobs:
     runs-on: [self-hosted, openshift, aci]
     environment: aci-tenant-emea-cto
     permissions:
-      contents: write
+      contents: read
     defaults:
       run:
         working-directory: ${{ env.WORKING_DIR }}
+    outputs:
+      applied: ${{ steps.tfapply.outcome }}
     steps:
       - name: Approval context
         env:
@@ -755,27 +763,6 @@ jobs:
 
       - name: Verify tools
         run: terraform version
-
-      # The connectivity suite needs SSHLibrary (which pulls paramiko) and dig.
-      # Probe the interpreter that actually runs Robot, not system python3 - they
-      # differ, and checking the wrong one produces a misleading warning.
-      - name: Verify nac-test fabric test dependencies
-        continue-on-error: true
-        run: |
-          {
-            NT="$(command -v nac-test || true)"
-            PY="$(head -1 "$NT" 2>/dev/null | sed 's|^#!||' | awk '{print $1}')"
-            echo "nac-test       : ${NT:-<not found>}"
-            echo "its interpreter: ${PY:-<unknown>}"
-            if [ -x "$PY" ]; then
-              "$PY" -c "import SSHLibrary, paramiko; print('SSHLibrary', SSHLibrary.__version__, '/ paramiko', paramiko.__version__)" \
-                || echo "::warning::SSHLibrary/paramiko missing from the Robot interpreter - fabric iping tests will fail to load"
-            else
-              echo "::warning::could not resolve nac-test's interpreter - skipping import check"
-            fi
-            command -v dig  >/dev/null && dig -v 2>&1 | head -1 || echo "::warning::dig is missing - resolver tests will skip"
-            command -v ping >/dev/null && echo "ping: present"   || echo "::warning::ping is missing - client gateway tests will skip"
-          }
 
       - name: Download plan
         uses: actions/download-artifact@v4
@@ -809,8 +796,8 @@ jobs:
           TF_STATE_CONN_STR: ${{ secrets.TF_STATE_CONN_STR }}
 
       # Single command, deliberately. A one-line body is read by bash in one
-      # read() syscall, so there is no second read to fail part way through the
-      # longest and least-recoverable operation in the workflow.
+      # read() syscall, so there is no second read to hit NFS ESTALE part way
+      # through the longest and least-recoverable operation in the workflow.
       - name: Apply
         id: tfapply
         run: terraform apply -input=false -auto-approve -lock-timeout=300s tfplan
@@ -820,7 +807,6 @@ jobs:
           ACI_PASSWORD: ${{ secrets.APIC_PASSWORD }}
           ACI_INSECURE: 'true'
 
-      # ═══════════════ Post-apply: re-validate against reality ═══════════════
       # Cheap, and catches the case where the data model shifted between plan and
       # apply. Advisory only - the change is already on the fabric by this point,
       # so failing the job here would be theatre.
@@ -849,7 +835,112 @@ jobs:
             exit 0
           }
 
-      # ═══════════════ Post-change operational verification ═══════════════
+      - name: Build step summary
+        if: always()
+        working-directory: .
+        shell: bash
+        env:
+          APPLY_RESULT: ${{ steps.tfapply.outcome }}
+          PLAN_SUMMARY: ${{ needs.plan.outputs.summary }}
+          VAL_LOW:      ${{ needs.validate.outputs.low }}
+        run: |
+          {
+            set -uo pipefail
+            {
+              if [ "${APPLY_RESULT:-}" = "success" ]; then
+                echo '# 3. Applied to APIC'
+                echo ''
+                echo "Plan applied: **${PLAN_SUMMARY:-unknown}**"
+              else
+                echo '# 3. Apply to APIC did not complete'
+                echo ''
+                echo "⚠️ The terraform apply step reported \`${APPLY_RESULT:-unknown}\`. The fabric may be partially changed - review the apply logs before re-running."
+              fi
+              echo ''
+              echo "Pre-deploy validation: passed (${VAL_LOW:-0} LOW findings)"
+              echo ''
+              echo 'Post-deploy verification runs in the **Post-deploy tests** job.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+  # ══════════════════════════════════════════════════════════
+  # JOB 5 — Post-deploy operational verification
+  #
+  # Runs in two situations:
+  #   1. automatically after a successful apply
+  #   2. standalone, via workflow_dispatch with action=test
+  #
+  # Standalone matters: verifying the fabric should never require pushing a
+  # config change purely to trigger a deployment. These tests are read-only
+  # (API GETs and iping over SSH), so re-running them costs nothing and tells
+  # you the current state rather than the state at last deploy.
+  #
+  # ENVIRONMENT: uses aci-tenant-emea-cto-test, which has the APIC and switch
+  # credentials but NO deployment protection rules. Pointing this at the apply
+  # environment would make every test run wait for approval - including the run
+  # immediately after an apply that was already approved.
+  # ══════════════════════════════════════════════════════════
+  test:
+    name: Post-deploy tests
+    needs: [validate, plan, apply]
+    # always() is required: on a test-only dispatch every upstream job is
+    # skipped, and a skipped dependency would otherwise skip this job too.
+    if: |
+      always() &&
+      (needs.apply.result == 'success' ||
+       (github.event_name == 'workflow_dispatch' && inputs.action == 'test'))
+    runs-on: [self-hosted, openshift, aci]
+    environment: aci-tenant-emea-cto-test
+    # contents: write for the gh-pages push.
+    permissions:
+      contents: write
+    steps:
+      - name: Run context
+        env:
+          TRIGGER:       ${{ github.event_name }}
+          ACTION:        ${{ inputs.action }}
+          APPLY_RESULT:  ${{ needs.apply.result }}
+          PLAN_SCOPE:    ${{ needs.plan.outputs.changed_subnets }}
+          INPUT_SCOPE:   ${{ inputs.changed_subnets }}
+          INCLUDE_TAGS:  ${{ inputs.include_tags }}
+        run: |
+          {
+            if [ "${APPLY_RESULT}" = "success" ]; then
+              echo "mode        : post-apply verification"
+            else
+              echo "mode        : standalone (verifying the fabric as it stands)"
+            fi
+            echo "trigger     : ${TRIGGER} ${ACTION:+action=${ACTION}}"
+            echo "plan scope  : ${PLAN_SCOPE:-<none>}"
+            echo "input scope : ${INPUT_SCOPE:-<none>}"
+            echo "tag filter  : ${INCLUDE_TAGS:-<none - full change-verification set>}"
+          }
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # The connectivity suite needs SSHLibrary (which pulls paramiko) and dig.
+      # Probe the interpreter that actually runs Robot, not system python3 - they
+      # differ, and checking the wrong one produces a misleading warning.
+      - name: Verify nac-test dependencies
+        continue-on-error: true
+        run: |
+          {
+            NT="$(command -v nac-test || true)"
+            PY="$(head -1 "$NT" 2>/dev/null | sed 's|^#!||' | awk '{print $1}')"
+            echo "nac-test       : ${NT:-<not found>}"
+            echo "its interpreter: ${PY:-<unknown>}"
+            if [ -x "$PY" ]; then
+              "$PY" -c "import SSHLibrary, paramiko; print('SSHLibrary', SSHLibrary.__version__, '/ paramiko', paramiko.__version__)" \
+                || echo "::warning::SSHLibrary/paramiko missing from the Robot interpreter - fabric iping tests will fail to load"
+            else
+              echo "::warning::could not resolve nac-test's interpreter - skipping import check"
+            fi
+            command -v dig  >/dev/null && dig -v 2>&1 | head -1 || echo "::warning::dig is missing - resolver tests will skip"
+            command -v ping >/dev/null && echo "ping: present"   || echo "::warning::ping is missing - client gateway tests will skip"
+          }
+
       # SWITCH_USER / SWITCH_PASSWORD / NODE_MGMT_MAP / CHANGED_SUBNETS are
       # passed as ENVIRONMENT variables, not via --variable: nac-test rejects
       # --variable ("No such option", exit 2), and the environment keeps the
@@ -857,15 +948,9 @@ jobs:
       #
       # --processes 2 caps the SSH fan-out. ACI leaves limit concurrent sessions
       # per user, and exceeding it produces failures that look like fabric faults.
-      #
-      # --exclude client-icmp is deliberately ABSENT. The client has L3Out
-      # reachability to these public BD gateways, so that test is a real
-      # bidirectional check and should gate.
       - name: nac-test - change verification
         id: nactest
-        if: always()
         continue-on-error: true
-        working-directory: .
         env:
           ACI_URL:         ${{ secrets.APIC_URL }}
           ACI_USERNAME:    ${{ secrets.APIC_USERNAME }}
@@ -873,16 +958,30 @@ jobs:
           SWITCH_USER:     ${{ secrets.SWITCH_USER }}
           SWITCH_PASSWORD: ${{ secrets.SWITCH_PASSWORD }}
           NODE_MGMT_MAP:   ${{ vars.NODE_MGMT_MAP }}
-          # CHANGED_SUBNETS: ${{ needs.plan.outputs.changed_subnets }}
-          CHANGED_SUBNETS: ''
+          # A dispatch input wins over the plan output, so a standalone run can
+          # be scoped by hand. Both empty means a full sweep.
+          CHANGED_SUBNETS: ${{ inputs.changed_subnets || needs.plan.outputs.changed_subnets }}
+          INCLUDE_TAGS:    ${{ inputs.include_tags }}
           PYTHONWARNINGS:  'ignore:Unverified HTTPS request'
         run: |
           {
-            echo "node map: ${NODE_MGMT_MAP:-<EMPTY - fabric tests will skip>}"
-            [ -n "$SWITCH_USER" ] && echo "SWITCH_USER: set" \
+            echo "node map    : ${NODE_MGMT_MAP:-<EMPTY - fabric tests will skip>}"
+            echo "ICMP scope  : ${CHANGED_SUBNETS:-<full sweep>}"
+            [ -n "$SWITCH_USER" ] && echo "SWITCH_USER : set" \
               || echo "::warning::SWITCH_USER is empty - fabric iping tests will skip"
             [ -n "$NODE_MGMT_MAP" ] \
               || echo "::warning::NODE_MGMT_MAP repo variable is not set - every fabric iping test will SKIP"
+
+            # A tag filter REPLACES the default exclusion rather than adding to
+            # it: asking for --include ucs-domain and silently also excluding
+            # baseline would quietly drop tests the operator explicitly asked for.
+            if [ -n "${INCLUDE_TAGS}" ]; then
+              TAG_ARGS=(--include "${INCLUDE_TAGS}")
+              echo "tag filter  : --include ${INCLUDE_TAGS}"
+            else
+              TAG_ARGS=(--exclude baseline)
+              echo "tag filter  : --exclude baseline (default)"
+            fi
 
             set +e
             nac-test \
@@ -891,7 +990,7 @@ jobs:
               -t "${NAC_TEST_TEMPLATES}" \
               -f "${NAC_TEST_FILTERS}" \
               -o nac-test-results \
-              --exclude baseline \
+              "${TAG_ARGS[@]}" \
               --processes 2 \
               --minimal-reports
             code=$?
@@ -921,11 +1020,13 @@ jobs:
             exit 0
           }
 
+      # Skipped when a tag filter is set: the operator asked for a specific
+      # subset, and a full baseline sweep alongside it would triple the runtime
+      # of what was meant to be a quick targeted check.
       - name: nac-test - fabric baseline (informational)
         id: nactest_baseline
-        if: always()
+        if: inputs.include_tags == ''
         continue-on-error: true
-        working-directory: .
         env:
           ACI_URL:         ${{ secrets.APIC_URL }}
           ACI_USERNAME:    ${{ secrets.APIC_USERNAME }}
@@ -955,7 +1056,6 @@ jobs:
 
       - name: Extract failed test detail
         if: always()
-        working-directory: .
         run: |
           {
             python3 - <<'PY'
@@ -1050,7 +1150,6 @@ jobs:
         id: pages
         if: always() && github.ref == 'refs/heads/main'
         continue-on-error: true
-        working-directory: .
         env:
           RUN_NUMBER: ${{ github.run_number }}
           COMMIT_SHA: ${{ github.sha }}
@@ -1070,7 +1169,6 @@ jobs:
 
             copied=0
 
-            # ── change-verification run ──
             # combined_summary.html links to robot_results/*.html, so that
             # directory structure MUST be preserved. Flat copies alone leave the
             # dashboard's internal links 404ing. pabot_results is deliberately
@@ -1086,20 +1184,17 @@ jobs:
               copied=$((copied+1))
             done
 
-            # Flat copies as well, so direct URLs and older summary links still
-            # resolve at the run root.
             for n in report.html log.html; do
               [ -f "nac-test-results/robot_results/$n" ] \
                 && cp "nac-test-results/robot_results/$n" "gh-pages/${DEST}/"
             done
 
-            # xunit.xml is small and useful to external consumers.
             [ -f nac-test-results/robot_results/xunit.xml ] \
               && cp nac-test-results/robot_results/xunit.xml "gh-pages/${DEST}/robot_results/"
 
-            # ── informational baseline run ──
-            # Kept in its own subtree so its combined_summary.html links to its own
-            # robot_results and cannot collide with the change-verification files.
+            # Kept in its own subtree so its combined_summary.html links to its
+            # own robot_results and cannot collide with the change-verification
+            # files.
             if [ -f nac-test-baseline/combined_summary.html ]; then
               cp nac-test-baseline/combined_summary.html "gh-pages/${DEST}/baseline/"
               copied=$((copied+1))
@@ -1114,8 +1209,6 @@ jobs:
             [ -f nac-test-baseline/robot_results/report.html ] \
               && cp nac-test-baseline/robot_results/report.html "gh-pages/${DEST}/baseline/"
 
-            # Drop the baseline tree entirely if nothing landed in it, so the
-            # published run directory does not advertise an empty folder.
             if [ -z "$(find "gh-pages/${DEST}/baseline" -type f 2>/dev/null)" ]; then
               rm -rf "gh-pages/${DEST}/baseline"
               echo "no baseline HTML produced - baseline/ omitted"
@@ -1127,8 +1220,8 @@ jobs:
               exit 0
             fi
 
-            # A directory with no index.html is a 404 on Pages. Prefer the combined
-            # dashboard, then the Robot report, then the flat copy.
+            # A directory with no index.html is a 404 on Pages. Prefer the
+            # combined dashboard, then the Robot report, then the flat copy.
             if [ ! -f "gh-pages/${DEST}/index.html" ]; then
               if   [ -f "gh-pages/${DEST}/combined_summary.html" ]; then
                 cp "gh-pages/${DEST}/combined_summary.html" "gh-pages/${DEST}/index.html"
@@ -1139,7 +1232,6 @@ jobs:
               fi
             fi
 
-            # Same for the baseline subtree, so .../baseline/ is browsable.
             if [ -d "gh-pages/${DEST}/baseline" ] && [ ! -f "gh-pages/${DEST}/baseline/index.html" ]; then
               if   [ -f "gh-pages/${DEST}/baseline/combined_summary.html" ]; then
                 cp "gh-pages/${DEST}/baseline/combined_summary.html" "gh-pages/${DEST}/baseline/index.html"
@@ -1152,10 +1244,10 @@ jobs:
               && echo "published=true"  >> "$GITHUB_OUTPUT" \
               || echo "published=false" >> "$GITHUB_OUTPUT"
 
-            # Root landing page. Regenerated each run and therefore only links the
-            # current one - the gh-pages checkout is created fresh here, so older
-            # run numbers are not enumerable. keep_files:true means older run
-            # directories persist on the branch and remain reachable by URL.
+            # Root landing page. Regenerated each run and therefore only links
+            # the current one - the gh-pages checkout is created fresh here, so
+            # older run numbers are not enumerable. keep_files:true means older
+            # run directories persist on the branch and remain reachable by URL.
             BASELINE_LINK=''
             if [ -f "gh-pages/${DEST}/baseline/index.html" ]; then
               BASELINE_LINK=" (<a href=\"${DEST}/baseline/\">baseline</a>)"
@@ -1187,7 +1279,6 @@ jobs:
 
       - name: Report Pages outcome
         if: always() && github.ref == 'refs/heads/main'
-        working-directory: .
         env:
           PAGES_STAGED: ${{ steps.pages.outputs.published }}
           PAGES_DEPLOY: ${{ steps.deploy.outcome }}
@@ -1199,7 +1290,7 @@ jobs:
             if [ "${PAGES_STAGED:-}" != "true" ]; then
               echo "::warning::No HTML was staged - nac-test produced no report. ${URL} will 404."
             elif [ "${PAGES_DEPLOY:-}" != "success" ]; then
-              echo "::error::gh-pages deploy failed (${PAGES_DEPLOY:-n/a}). Check that the apply job has 'permissions: contents: write'. ${URL} will 404."
+              echo "::error::gh-pages deploy failed (${PAGES_DEPLOY:-n/a}). Check that this job has 'permissions: contents: write'. ${URL} will 404."
             else
               echo "published to ${URL} - allow ~1 min for the Pages build"
             fi
@@ -1207,7 +1298,6 @@ jobs:
 
       - name: Build step summary
         if: always()
-        working-directory: .
         shell: bash
         env:
           # All ${{ }} interpolation stays out of the script body - the runner
@@ -1217,9 +1307,10 @@ jobs:
           PASSED:        ${{ steps.nactest.outputs.passed }}
           FAILED:        ${{ steps.nactest.outputs.failed }}
           SKIPPED:       ${{ steps.nactest.outputs.skipped }}
-          APPLY_RESULT:  ${{ steps.tfapply.outcome }}
+          APPLY_RESULT:  ${{ needs.apply.result }}
           PLAN_SUMMARY:  ${{ needs.plan.outputs.summary }}
-          VAL_LOW:       ${{ needs.validate.outputs.low }}
+          INCLUDE_TAGS:  ${{ inputs.include_tags }}
+          SCOPE:         ${{ inputs.changed_subnets || needs.plan.outputs.changed_subnets }}
           PAGES_STAGED:  ${{ steps.pages.outputs.published }}
           PAGES_DEPLOY:  ${{ steps.deploy.outcome }}
           RUN_URL:       ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -1230,23 +1321,17 @@ jobs:
           {
             set -uo pipefail
             {
+              echo '# 4. Post-deploy operational verification (nac-test)'
+              echo ''
               if [ "${APPLY_RESULT:-}" = "success" ]; then
-                echo '# Applied to APIC'
+                echo "Verifying the change just applied: **${PLAN_SUMMARY:-unknown}**"
               else
-                echo '# Apply to APIC did not complete'
-                echo ''
-                echo "⚠️ The terraform apply step reported \`${APPLY_RESULT:-unknown}\`. The fabric may be partially changed - review the apply logs before re-running."
+                echo '**Standalone run** - verifying the fabric as it currently stands, with no deployment in this run.'
               fi
               echo ''
-              echo "Plan applied: **${PLAN_SUMMARY:-unknown}**"
+              echo "Tag filter: \`${INCLUDE_TAGS:-none (full change-verification set)}\`"
               echo ''
-              echo "Pre-deploy validation: passed (${VAL_LOW:-0} LOW findings)"
-              echo ''
-              echo '---'
-              echo ''
-              echo '## 3. Post-change operational verification (nac-test)'
-              echo ''
-              echo "Fabric ICMP scope: \`all subnets in plan\`"
+              echo "ICMP scope: \`${SCOPE:-all configured subnets (full sweep)}\`"
               echo ''
 
               if [ "${FAILED:-0}" = "0" ] && [ "${TOTAL:-0}" != "0" ]; then
@@ -1256,14 +1341,14 @@ jobs:
                   "- Fabric-sourced ICMP from each BD anycast gateway (iping on a border leaf, inside the tenant VRF)" \
                   "- Client reachability to those same gateways over the L3Out" \
                   "- Static path bindings and encap" \
+                  "- UCS domain interface state, admin and operational" \
                   "- L3Out BGP state" \
                   "- vPC state" \
-                  "- Interface state" \
                   "- DNS reachability"
               elif [ "${TOTAL:-0}" = "0" ]; then
-                echo "⚠️ **No tests ran** - check the nac-test step logs (template render, missing SSHLibrary, or credential failure)."
+                echo "⚠️ **No tests ran** - check the nac-test step logs (template render, a tag filter matching nothing, missing SSHLibrary, or a credential failure)."
               else
-                echo "❌ **${FAILED:-0} of ${TOTAL:-0} operational tests failed.** The change is applied; investigate below."
+                echo "❌ **${FAILED:-0} of ${TOTAL:-0} operational tests failed.**"
               fi
 
               if [ "${SKIPPED:-0}" != "0" ]; then
@@ -1293,7 +1378,7 @@ jobs:
               # element render but lose their anchors.
               if [ -s "${FAILURES_FILE}" ]; then
                 echo ''
-                echo '### ❌ Failed change-verification tests'
+                echo '### ❌ Failed tests'
                 echo ''
                 cat "${FAILURES_FILE}"
               fi
