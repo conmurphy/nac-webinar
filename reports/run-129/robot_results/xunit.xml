@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="Robot Results" tests="32" errors="0" failures="8" skipped="2" time="4.197" timestamp="2026-09-05T13:30:31.802717">
+<testsuite name="Operational" tests="32" errors="0" failures="8" skipped="2" time="3.769" timestamp="2026-09-05T13:30:32.258000">
+<testsuite name="Connectivity" tests="6" errors="0" failures="0" skipped="2" time="2.757" timestamp="2026-09-05T13:30:32.259000">
+<testcase classname="Robot Results.Operational.Connectivity" name="ICMP From Fabric Gateway 198.18.215.129 In emea-cto BD 198.18.215.128_26 To Internet" time="0.003">
+<skipped message="NODE_MGMT_MAP / SWITCH_USER / credential not configured - no fabric SSH target" type="SkipExecution"/>
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="ICMP From Fabric Gateway 198.18.215.129 In emea-cto BD 198.18.215.128_26 To DNS Servers" time="0.003">
+<skipped message="NODE_MGMT_MAP / SWITCH_USER / credential not configured - no fabric SSH target" type="SkipExecution"/>
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="ICMP From Client To Gateway 198.18.215.129 In emea-cto BD 198.18.215.128_26" time="2.109">
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Verify DHCP Server Is Reachable" time="0.004">
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Verify DNS Servers Answer Queries" time="0.213">
+</testcase>
+<testcase classname="Robot Results.Operational.Connectivity" name="Verify DNS Servers Agree Or Both Fail" time="0.213">
+</testcase>
+<properties>
+<property name="Documentation" value="Post-change connectivity verification for the ACI fabric.&#10;&#10;Test cases are rendered from the data model for every subnet&#10;that has a gateway and a resolvable candidate leaf. Whether a&#10;subnet CAN be reached externally is then decided in the test&#10;body, not at render time, so an unreachable subnet produces a&#10;visible SKIP or FAIL rather than silently vanishing from the&#10;report:&#10;&#10;  public true  + l3out present -&gt; run the check&#10;  public true  + l3out absent  -&gt; FAIL, advertised nowhere&#10;  public false + l3out present -&gt; FAIL, l3out cannot carry it&#10;  public false + l3out absent  -&gt; SKIP, internal by design&#10;&#10;CHANGED_SUBNETS then narrows execution to the subnets touched&#10;by this change; when it is empty the full configured set runs&#10;as a regression sweep.&#10;&#10;TEMPLATE WHITESPACE NOTE: nac-test renders with&#10;trim_blocks=True, so a Jinja block tag inside a test BODY&#10;swallows the newline that separates the next Robot line and&#10;the two get joined - which silently turned '${in_scope}=' into&#10;a [Tags] value. Never put a Jinja if/endif block inside a test&#10;body. Compute conditions and messages in the header and emit&#10;one unconditional line with a rendered True/False."/>
+</properties>
+</testsuite>
+<testsuite name="Emea-Cto" tests="5" errors="0" failures="0" skipped="0" time="1.304" timestamp="2026-09-05T13:30:32.268000">
+<testsuite name="L3Out" tests="2" errors="0" failures="0" skipped="0" time="0.470" timestamp="2026-09-05T13:30:32.268975">
+<testcase classname="Robot Results.Operational.Emea-Cto.L3Out" name="Verify L3out l3out-to-core-01 BGP Peer 172.16.1.209/29 Node 1101 Interface 1" time="0.054">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.L3Out" name="Verify L3out l3out-to-core-01 BGP Peer 172.16.1.209/29 Node 1102 Interface 1" time="0.034">
+</testcase>
+<properties>
+<property name="Documentation" value="Verify L3out Operational State"/>
+</properties>
+</testsuite>
+<testsuite name="Static Port" tests="3" errors="0" failures="0" skipped="0" time="0.453" timestamp="2026-09-05T13:30:33.118708">
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.128_26 Deployed Path Count" time="0.036">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.128_26 Path vpc-ucs-prod-01-6454-A VLAN 1230 Deployed" time="0.059">
+</testcase>
+<testcase classname="Robot Results.Operational.Emea-Cto.Static Port" name="Verify EPG 198.18.215.128_26 Path vpc-ucs-prod-01-6454-B VLAN 1230 Deployed" time="0.042">
+</testcase>
+<properties>
+<property name="Documentation" value="Verify EPG Static Path Deployment&#10;&#10;Two assertion levels per path:&#10;  1. The fvRsPathAtt MO exists (config accepted by APIC).&#10;  2. Its relation is not 'missing-target', which would mean the&#10;     vPC or interface policy group named in the path does not&#10;     exist - config present, no connectivity.&#10;&#10;NOTE: state='formed' is NOT asserted. Verified on this fabric&#10;that working vPC static paths report state='unformed' while&#10;vlanCktEp shows operSt=up with a real hwId, because the target&#10;fabricPathEp lives in the topology tree rather than the policy&#10;tree. Asserting 'formed' produces a false failure on every&#10;binding. Hardware programming is the reliable signal.&#10;&#10;CHANGED_PATHS can narrow execution to the bindings touched by&#10;this change, matched on full DN. Not wired into the pipeline:&#10;these are 13 sub-second API calls, so scoping saves nothing and&#10;a full sweep is the stronger statement. Leaving the variable&#10;unset runs everything."/>
+</properties>
+</testsuite>
+</testsuite>
+<testsuite name="Interface" tests="1" errors="0" failures="0" skipped="0" time="0.360" timestamp="2026-09-05T13:30:33.925648">
+<testcase classname="Robot Results.Operational.Interface" name="Verify No Configured Interface Is Down Due To Error" time="0.051">
+</testcase>
+<properties>
+<property name="Documentation" value="Verify Physical Interface Operational State"/>
+</properties>
+</testsuite>
+<testsuite name="Ucs Domain Interfaces" tests="18" errors="0" failures="7" skipped="0" time="1.178" timestamp="2026-09-05T13:30:34.633671">
+<testcase classname="Robot Results.Operational.Ucs Domain Interfaces" name="Verify PROD UCS Interface eth1/15 On Node 1101 Is Up" time="0.092">
+<failure message="PROD UCS interface eth1/15 on node 1101 (vpc-ucs-prod-01-6454-A) is ADMINISTRATIVELY DOWN (adminSt=down). Somebody disabled the port, or it is blacklisted out of service. Re-enable it in Fabric &gt; Inventory, or remove the out-of-service entry. This is a config action, not a cabling fault." type="AssertionError"/>
+</testcase>
+<testcase classname="Robot Results.Operational.Ucs Domain Interfaces" name="Verify PROD UCS Interface eth1/15 On Node 1102 Is Up" time="0.068">
+</testcase>
+<testcase classname="Robot Results.Operational.Ucs Domain Interfaces" name="Verify PROD UCS Interface eth1/16 On Node 1101 Is Up" time="0.066">
+</testcase>
+<testcase classname="Robot Results.Operational.Ucs Domain Interfaces" name="Verify PROD UCS Interface eth1/16 On Node 1102 Is Up" time="0.070">
+</testcase>
+<testcase classname="Robot Results.Operational.Ucs Domain Interfaces" name="Verify TEST UCS Interface eth1/11 On Node 1101 Is Up" time="0.086">
+</testcase>
+<testcase classname="Robot Results.Operational.Ucs Domain Interfaces" name="Verify TEST UCS Interface eth1/11 On Node 1102 Is Up" time="0.067">
+</testcase>
+<testcase classname="Robot Results.Operational.Ucs Domain Interfaces" name="Verify TEST UCS Interface eth1/12 On Node 1101 Is Up" time="0.067">
+</testcase>
+<testcase classname="Robot Results.Operational.Ucs Domain Interfaces" name="Verify TEST UCS Interface eth1/12 On Node 1102 Is Up" time="0.070">
+</testcase>
+<testcase classname="Robot Results.Operational.Ucs Domain Interfaces" name="Verify SANDBOX UCS Interface eth1/17 On Node 1101 Is Up" time="0.066">
+</testcase>
+<testcase classname="Robot Results.Operational.Ucs Domain Interfaces" name="Verify SANDBOX UCS Interface eth1/17 On Node 1102 Is Up" time="0.067">
+</testcase>
+<testcase classname="Robot Results.Operational.Ucs Domain Interfaces" name="Verify SANDBOX UCS Interface eth1/18 On Node 1101 Is Up" time="0.070">
+</testcase>
+<testcase classname="Robot Results.Operational.Ucs Domain Interfaces" name="Verify SANDBOX UCS Interface eth1/18 On Node 1102 Is Up" time="0.067">
+</testcase>
+<testcase classname="Robot Results.Operational.Ucs Domain Interfaces" name="Verify Node 1101 Retains A Path To The PROD UCS Domain" time="0.002">
+<failure message="Variable '${r}' not found." type="AssertionError"/>
+</testcase>
+<testcase classname="Robot Results.Operational.Ucs Domain Interfaces" name="Verify Node 1102 Retains A Path To The PROD UCS Domain" time="0.002">
+<failure message="Variable '${r}' not found." type="AssertionError"/>
+</testcase>
+<testcase classname="Robot Results.Operational.Ucs Domain Interfaces" name="Verify Node 1101 Retains A Path To The TEST UCS Domain" time="0.002">
+<failure message="Variable '${r}' not found." type="AssertionError"/>
+</testcase>
+<testcase classname="Robot Results.Operational.Ucs Domain Interfaces" name="Verify Node 1102 Retains A Path To The TEST UCS Domain" time="0.002">
+<failure message="Variable '${r}' not found." type="AssertionError"/>
+</testcase>
+<testcase classname="Robot Results.Operational.Ucs Domain Interfaces" name="Verify Node 1101 Retains A Path To The SANDBOX UCS Domain" time="0.002">
+<failure message="Variable '${r}' not found." type="AssertionError"/>
+</testcase>
+<testcase classname="Robot Results.Operational.Ucs Domain Interfaces" name="Verify Node 1102 Retains A Path To The SANDBOX UCS Domain" time="0.002">
+<failure message="Variable '${r}' not found." type="AssertionError"/>
+</testcase>
+<properties>
+<property name="Documentation" value="Verify the leaf interfaces facing each UCS domain are up.&#10;&#10;WHY THIS EXISTS ALONGSIDE THE vPC TEST&#10;The vPC suite reports that a bundle is down on one or both&#10;peers. It does not say which member interface, nor why. This&#10;suite checks each physical member and separates the two&#10;causes that need completely different responses:&#10;&#10;  adminSt down  - somebody disabled the port, or it is&#10;                  blacklisted via fabricRsOosPath. A config&#10;                  action, reversible in the APIC UI.&#10;  operSt down   - the port is configured up but the link is&#10;                  not forming. Cable, transceiver, or the&#10;                  UCS fabric interconnect side.&#10;&#10;WHY IT MATTERS BEYOND THE UCS DOMAIN ITSELF&#10;A bridge domain is only deployed on a leaf where an EPG has&#10;an OPERATIONAL static path. If both UCS legs on a leaf are&#10;down, the pervasive SVI is not programmed there, and a&#10;fabric-sourced ping from the BD gateway on that leaf fails&#10;with &quot;% Invalid source address&quot; - which reads like a routing&#10;fault but is really this.&#10;&#10;SOURCE OF TRUTH&#10;UCS_DOMAINS below is a hardcoded map, not derived from the&#10;data model. The bundle-to-physical-port mapping lives in&#10;infraPortBlk under the port selectors and is not expressed in&#10;the NaC YAML, so it cannot be rendered from it. It IS&#10;duplicated in the nac-validate rules&#10;(204_static_port_domain_coverage.py and&#10;210_static_paths_prod_only.py) - grep for DUPLICATED-IN&#10;before editing any copy."/>
+</properties>
+</testsuite>
+<testsuite name="Vpc" tests="2" errors="0" failures="1" skipped="0" time="0.411" timestamp="2026-09-05T13:30:35.616288">
+<testcase classname="Robot Results.Operational.Vpc" name="Verify vPC Bundle vpc-ucs-prod-01-6454-A Is Up On Both Peers" time="0.063">
+<failure message="Several failures occurred:&#10;&#10;1) &quot;vpc-ucs-prod-01-6454-A: localOperSt is down, expected up&quot;&#10;&#10;2) &quot;vpc-ucs-prod-01-6454-A: remoteOperSt is down, expected up&quot;" type="AssertionError"/>
+</testcase>
+<testcase classname="Robot Results.Operational.Vpc" name="Verify vPC Bundle vpc-ucs-prod-01-6454-B Is Up On Both Peers" time="0.044">
+</testcase>
+<properties>
+<property name="Documentation" value="Verify vPC Domain And Member Interface State"/>
+</properties>
+</testsuite>
+</testsuite>
+<properties>
+<property name="Pabot Info" value="[https://pabot.org/?ref=log|Pabot] result from 6 executions."/>
+<property name="Pabot Version" value="5.2.2"/>
+</properties>
+</testsuite>
