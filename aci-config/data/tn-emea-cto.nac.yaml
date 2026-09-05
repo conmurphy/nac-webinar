@@ -13,6 +13,7 @@ apic:
       bridge_domains:
         - name: 198.18.215.128_26 
           alias: app-02-web
+          description: this is the application-02 web server subnet
           vrf: vrf-external
           subnets:
           - ip: 198.18.215.129/26
