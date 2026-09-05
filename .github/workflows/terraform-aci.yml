@@ -350,7 +350,7 @@ jobs:
 
       - name: Upload validation output
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nac-validate
           path: |
@@ -623,7 +623,7 @@ jobs:
 
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tfplan
           path: |
@@ -763,7 +763,7 @@ jobs:
 
       - name: Upload rendered comment
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pr-comment
           path: pr-comment.md
@@ -1190,7 +1190,7 @@ jobs:
 
       - name: Upload nac-test reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nac-test-reports
           path: |
