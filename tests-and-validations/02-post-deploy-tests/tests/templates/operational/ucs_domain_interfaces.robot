@@ -35,17 +35,13 @@ Documentation       Verify the leaf interfaces facing each UCS domain are up.
 ...                 impact from the change under test.
 ...
 ...                 TEMPLATE WHITESPACE NOTE
-...                 nac-test renders with trim_blocks=True. A Jinja BLOCK tag
-...                 ({% for %}, {% if %}) inside a test body swallows the newline
-...                 that separates the next Robot line, and the two get joined -
-...                 which silently turned 'Create List' into a keyword consuming
-...                 the following 'GET On Session' line as an argument, so its
-...                 assignment never happened and the test died on
-...                 "Variable '${r}' not found".
+...                 nac-test renders with trim_blocks=True. A Jinja BLOCK tag - a
+...                 for or if statement, as opposed to a plain expression -
+...                 placed inside a test body swallows the newline that separates
+...                 the next Robot line, and the two get joined -
 ...
 ...                 Every loop and conditional here therefore lives either in a
-...                 Robot keyword, or in Jinja ABOVE the test name. Test bodies
-...                 contain only {{ }} expressions.
+...                 Robot keyword, or in Jinja ABOVE the test name.
 ...
 ...                 SOURCE OF TRUTH
 ...                 UCS_DOMAINS is a hardcoded map, not derived from the data
