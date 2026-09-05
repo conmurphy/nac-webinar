@@ -292,6 +292,15 @@ jobs:
 # ══════════════════════════════════════════════════════════
   # JOB 2 — Terraform plan
   # Only runs once validation passes.
+  #
+  # NFS NOTE: every multi-line step body below is wrapped in a single compound
+  # command `{ ... }`. bash reads a script FILE lazily, one command at a time.
+  # The step script lives in RUNNER_TEMP, which on this runner is NFS-backed, so
+  # a long step leaves a window for the file handle to go stale - bash then dies
+  # with "error reading input file: Stale file handle" AFTER the command it was
+  # running has already succeeded. Wrapping forces bash to parse to the closing
+  # brace before executing anything, so the whole script is read while the handle
+  # is still valid.
   # ══════════════════════════════════════════════════════════
   plan:
     name: Terraform Plan
@@ -316,55 +325,48 @@ jobs:
 
       - name: Prepare cache dirs
         run: |
-          mkdir -p "$TF_PLUGIN_CACHE_DIR" "$TF_DATA_DIR"
-          if [ -d "$TF_DATA_DIR/modules" ]; then
-            echo "module cache: WARM"
-          else
-            echo "module cache: COLD - first init will be slow"
-          fi
+          {
+            mkdir -p "$TF_PLUGIN_CACHE_DIR" "$TF_DATA_DIR"
+            if [ -d "$TF_DATA_DIR/modules" ]; then
+              echo "module cache: WARM"
+            else
+              echo "module cache: COLD - first init will be slow"
+            fi
+          }
 
       - name: Verify tools
         run: |
-          terraform version
-          jq --version
+          {
+            terraform version
+            jq --version
+          }
 
       - name: Init
         run: |
-          : "${TF_STATE_CONN_STR:?TF_STATE_CONN_STR is empty - check environment secrets}"
-          : "${TF_STATE_SCHEMA:?TF_STATE_SCHEMA is empty - check workflow env}"
-          start=$(date +%s)
-          terraform init -input=false -reconfigure \
-            -backend-config="conn_str=${TF_STATE_CONN_STR}" \
-            -backend-config="schema_name=${TF_STATE_SCHEMA}"
-          echo "init took $(( $(date +%s) - start ))s"
+          {
+            : "${TF_STATE_CONN_STR:?TF_STATE_CONN_STR is empty - check environment secrets}"
+            : "${TF_STATE_SCHEMA:?TF_STATE_SCHEMA is empty - check workflow env}"
+            start=$(date +%s)
+            terraform init -input=false -reconfigure \
+              -backend-config="conn_str=${TF_STATE_CONN_STR}" \
+              -backend-config="schema_name=${TF_STATE_SCHEMA}"
+            echo "init took $(( $(date +%s) - start ))s"
+          }
         env:
           TF_STATE_CONN_STR: ${{ secrets.TF_STATE_CONN_STR }}
 
       - name: Validate
         run: terraform validate
 
+      # Deliberately minimal: a four-line body is read by bash in a single
+      # read() call, so there is no later read that can hit NFS ESTALE while
+      # terraform is running. All post-processing lives in separate steps.
       - name: Plan
         id: plan
         run: |
           set +e
-          terraform plan -input=false -lock-timeout=300s \
-            -detailed-exitcode -no-color \
-            -out=tfplan
-          code=$?
-          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
-
-          if [ -f tfplan ]; then
-            terraform show -no-color tfplan > tfplan.txt
-            terraform show -json    tfplan > plan.json
-          else
-            echo "No plan file produced - plan failed before writing output." > tfplan.txt
-            echo '{}' > plan.json
-          fi
-
-          if [ "$code" = "1" ]; then
-            echo "::error::terraform plan failed"
-            exit 1
-          fi
+          terraform plan -input=false -lock-timeout=300s -detailed-exitcode -no-color -out=tfplan
+          echo "exitcode=$?" >> "$GITHUB_OUTPUT"
           exit 0
         env:
           ACI_URL:      ${{ secrets.APIC_URL }}
@@ -372,37 +374,75 @@ jobs:
           ACI_PASSWORD: ${{ secrets.APIC_PASSWORD }}
           ACI_INSECURE: 'true'
 
+      # Separate step so a stale-handle failure during the long plan cannot take
+      # the plan rendering with it. Runs even when the plan failed, so tfplan.txt
+      # always exists for the PR comment.
+      - name: Render plan
+        if: always()
+        run: |
+          {
+            if [ -f tfplan ]; then
+              terraform show -no-color tfplan > tfplan.txt
+              terraform show -json    tfplan > plan.json
+            else
+              echo "No plan file produced - plan failed before writing output." > tfplan.txt
+              echo '{}' > plan.json
+            fi
+            wc -l tfplan.txt
+            wc -c plan.json
+          }
+
+      - name: Check plan result
+        env:
+          PLAN_EXITCODE: ${{ steps.plan.outputs.exitcode }}
+        run: |
+          {
+            case "${PLAN_EXITCODE:-}" in
+              0) echo "no changes" ;;
+              2) echo "changes detected" ;;
+              1) echo "::error::terraform plan failed"; exit 1 ;;
+              "") echo "::error::plan exit code was not captured - the step was interrupted before it could record one. This is a runner/filesystem fault, not a configuration fault. Re-run the job."
+                  exit 1 ;;
+              *) echo "::error::terraform plan exited ${PLAN_EXITCODE} (unexpected)"; exit 1 ;;
+            esac
+          }
+
       - name: Extract summary line
         id: summary
+        if: always()
         run: |
-          line=""
-          if [ -f tfplan.txt ]; then
-            # `|| true` on grep, not on the pipeline - head always exits 0, so a
-            # trailing `|| echo unknown` on the pipe is dead code.
-            line="$(grep -E '^(Plan:|No changes)' tfplan.txt || true)"
-            line="$(printf '%s\n' "$line" | head -1)"
-          fi
-          [ -n "$line" ] || line="unknown"
-
-          # Delimiter form: safe for arbitrary text, including newlines.
           {
-            echo 'line<<__TF_SUMMARY__'
-            printf '%s\n' "$line"
-            echo '__TF_SUMMARY__'
-          } >> "$GITHUB_OUTPUT"
-          echo "$line"
+            line=""
+            if [ -f tfplan.txt ]; then
+              # `|| true` on grep, not on the pipeline - head always exits 0, so a
+              # trailing `|| echo unknown` on the pipe is dead code.
+              line="$(grep -E '^(Plan:|No changes)' tfplan.txt || true)"
+              line="$(printf '%s\n' "$line" | head -1)"
+            fi
+            [ -n "$line" ] || line="unknown"
+
+            # Delimiter form: safe for arbitrary text, including newlines.
+            {
+              echo 'line<<__TF_SUMMARY__'
+              printf '%s\n' "$line"
+              echo '__TF_SUMMARY__'
+            } >> "$GITHUB_OUTPUT"
+            echo "$line"
+          }
 
       - name: Build plan change table
         id: plantable
         if: always()
         run: |
-          if [ -f plan.json ]; then
-            python3 "${GITHUB_WORKSPACE}/.github/scripts/plan_summary.py" \
-              plan.json > plan-summary.md
-          else
-            echo "_No plan JSON produced._" > plan-summary.md
-          fi
-          head -40 plan-summary.md
+          {
+            if [ -f plan.json ]; then
+              python3 "${GITHUB_WORKSPACE}/.github/scripts/plan_summary.py" \
+                plan.json > plan-summary.md
+            else
+              echo "_No plan JSON produced._" > plan-summary.md
+            fi
+            head -40 plan-summary.md
+          }
 
       # ─────────── Change scoping for post-deploy tests ───────────
       # The YAML data model is declarative and has no notion of "new". plan.json
@@ -417,53 +457,55 @@ jobs:
         id: changed
         if: always()
         run: |
-          if [ ! -f plan.json ]; then
-            echo "subnets=" >> "$GITHUB_OUTPUT"
-            echo "bds=" >> "$GITHUB_OUTPUT"
-            echo "no plan.json - post-deploy tests will run a full sweep"
-            exit 0
-          fi
+          {
+            if [ ! -f plan.json ]; then
+              echo "subnets=" >> "$GITHUB_OUTPUT"
+              echo "bds=" >> "$GITHUB_OUTPUT"
+              echo "no plan.json - post-deploy tests will run a full sweep"
+              exit 0
+            fi
 
-          # fvSubnet objects being created or updated.
-          #
-          # NO REGEX and no backslash escapes. jq string literals accept only
-          # JSON escapes, so a pattern containing "\[" aborts the program - and
-          # with stderr suppressed that failure is invisible, silently yielding
-          # an empty list and a permanent full sweep. split()/ltrimstr()/
-          # rtrimstr() achieve the same parse using characters that cannot be
-          # mangled by copy/paste.
-          #
-          # Example dn:
-          #   uni/tn-emea-cto/BD-198.18.215.0_26/subnet-[198.18.215.1/26]
-          if ! jq -r '
-            .resource_changes[]
-            | select((.change.actions // []) | any(. == "create" or . == "update"))
-            | (.change.after // {}) as $a
-            | select(($a.class_name // "") == "fvSubnet")
-            | ($a.dn // "") as $dn
-            | if ($dn | contains("/BD-")) and ($dn | contains("/subnet-")) then
-                ( ($dn | split("/BD-") | .[1] | split("/") | .[0]) as $bd
-                | ($dn | split("/subnet-") | .[1] | ltrimstr("[") | rtrimstr("]")) as $ip
-                | "\($bd)\t\($ip)" )
-              elif (($a.content.ip // "") != "") then
-                "unknown\t\($a.content.ip)"
-              else
-                empty
-              end
-          ' plan.json > changed-subnets.tsv; then
-            echo "::warning::fvSubnet extraction failed - post-deploy tests will run a full sweep"
-            : > changed-subnets.tsv
-          fi
+            # fvSubnet objects being created or updated.
+            #
+            # NO REGEX and no backslash escapes. jq string literals accept only
+            # JSON escapes, so a pattern containing "\[" aborts the program - and
+            # with stderr suppressed that failure is invisible, silently yielding
+            # an empty list and a permanent full sweep. split()/ltrimstr()/
+            # rtrimstr() achieve the same parse using characters that cannot be
+            # mangled by copy/paste.
+            #
+            # Example dn:
+            #   uni/tn-emea-cto/BD-198.18.215.0_26/subnet-[198.18.215.1/26]
+            if ! jq -r '
+              .resource_changes[]
+              | select((.change.actions // []) | any(. == "create" or . == "update"))
+              | (.change.after // {}) as $a
+              | select(($a.class_name // "") == "fvSubnet")
+              | ($a.dn // "") as $dn
+              | if ($dn | contains("/BD-")) and ($dn | contains("/subnet-")) then
+                  ( ($dn | split("/BD-") | .[1] | split("/") | .[0]) as $bd
+                  | ($dn | split("/subnet-") | .[1] | ltrimstr("[") | rtrimstr("]")) as $ip
+                  | "\($bd)\t\($ip)" )
+                elif (($a.content.ip // "") != "") then
+                  "unknown\t\($a.content.ip)"
+                else
+                  empty
+                end
+            ' plan.json > changed-subnets.tsv; then
+              echo "::warning::fvSubnet extraction failed - post-deploy tests will run a full sweep"
+              : > changed-subnets.tsv
+            fi
 
-          SUBNETS="$(cut -f2 changed-subnets.tsv | paste -sd, - || true)"
-          BDS="$(cut -f1 changed-subnets.tsv | sort -u | paste -sd, - || true)"
+            SUBNETS="$(cut -f2 changed-subnets.tsv | paste -sd, - || true)"
+            BDS="$(cut -f1 changed-subnets.tsv | sort -u | paste -sd, - || true)"
 
-          echo "subnets=${SUBNETS}" >> "$GITHUB_OUTPUT"
-          echo "bds=${BDS}"         >> "$GITHUB_OUTPUT"
-          echo "changed subnets: ${SUBNETS:-<none - tests will run a full sweep>}"
-          echo "changed BDs    : ${BDS:-<none>}"
-          echo '--- changed-subnets.tsv ---'
-          cat changed-subnets.tsv || true
+            echo "subnets=${SUBNETS}" >> "$GITHUB_OUTPUT"
+            echo "bds=${BDS}"         >> "$GITHUB_OUTPUT"
+            echo "changed subnets: ${SUBNETS:-<none - tests will run a full sweep>}"
+            echo "changed BDs    : ${BDS:-<none>}"
+            echo '--- changed-subnets.tsv ---'
+            cat changed-subnets.tsv || true
+          }
 
       - name: Build step summary
         if: always()
@@ -473,30 +515,33 @@ jobs:
           PLAN_EXITCODE: ${{ steps.plan.outputs.exitcode }}
           SCOPE:         ${{ steps.changed.outputs.subnets }}
         run: |
-          set -uo pipefail
           {
-            echo '# 2. Terraform plan'
-            echo ''
-            echo "**Plan:** ${PLAN_LINE:-unknown}"
-            echo ''
-            case "${PLAN_EXITCODE:-}" in
-              2) echo '⚠️ Changes detected - **Apply to APIC** is waiting for approval.' ;;
-              0) echo '✅ No changes. Apply will be skipped.' ;;
-              *) echo '❌ Plan did not complete - see the Plan step logs.' ;;
-            esac
-            echo ''
-            cat plan-summary.md 2>/dev/null || echo '_No summary._'
-            echo ''
-            echo "**Post-deploy test scope:** \`${SCOPE:-all configured subnets (full sweep)}\`"
-            echo ''
-            echo '<details><summary>Raw terraform plan output</summary>'
-            echo ''
-            echo '```hcl'
-            head -c 50000 tfplan.txt 2>/dev/null || echo '(no plan output)'
-            echo ''
-            echo '```'
-            echo '</details>'
-          } >> "$GITHUB_STEP_SUMMARY"
+            set -uo pipefail
+            {
+              echo '# 2. Terraform plan'
+              echo ''
+              echo "**Plan:** ${PLAN_LINE:-unknown}"
+              echo ''
+              case "${PLAN_EXITCODE:-}" in
+                2) echo '⚠️ Changes detected - **Apply to APIC** is waiting for approval.' ;;
+                0) echo '✅ No changes. Apply will be skipped.' ;;
+                '') echo '❌ Plan was interrupted before recording a result - re-run the job.' ;;
+                *) echo '❌ Plan did not complete - see the Plan step logs.' ;;
+              esac
+              echo ''
+              cat plan-summary.md 2>/dev/null || echo '_No summary._'
+              echo ''
+              echo "**Post-deploy test scope:** \`${SCOPE:-all configured subnets (full sweep)}\`"
+              echo ''
+              echo '<details><summary>Raw terraform plan output</summary>'
+              echo ''
+              echo '```hcl'
+              head -c 50000 tfplan.txt 2>/dev/null || echo '(no plan output)'
+              echo ''
+              echo '```'
+              echo '</details>'
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
 
       - name: Upload artifacts
         if: always()
@@ -515,23 +560,37 @@ jobs:
 # ══════════════════════════════════════════════════════════
   # JOB 3 — PR report
   #
-  # One sticky comment covering validation and plan, updated in place on every
-  # commit rather than appended. Owns all PR commenting so validate and plan can
+  # One sticky comment covering validation and plan, edited in place on every
+  # commit rather than appended. Owns all PR commenting, so validate and plan
   # stay on contents:read.
+  #
+  # Body generation lives in .github/scripts/pr_comment.py; the github-script
+  # step only performs the upsert. Keeps shell-continuation backslashes out of
+  # the YAML -> JavaScript boundary, which is where they break.
   # ══════════════════════════════════════════════════════════
   report:
     name: PR report
     needs: [validate, plan]
     # always(): a validation failure skips the plan job entirely, and that is
-    # precisely when the reviewer most needs the comment.
+    # exactly when the reviewer most needs this comment.
     if: always() && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
     steps:
-      # continue-on-error: the artifact does not exist when its job was skipped
-      # or failed early. The report degrades rather than failing.
+      # MUST come before the artifact downloads. actions/checkout cleans the
+      # workspace by default, so checking out afterwards would delete them.
+      # Sparse checkout because only the renderer is needed here.
+      - name: Checkout report script
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+
+      # continue-on-error: the artifact will not exist when its job was skipped
+      # or failed before uploading. The report degrades instead of failing.
       - name: Download validation report
         continue-on-error: true
         uses: actions/download-artifact@v4
@@ -547,10 +606,13 @@ jobs:
           path: reports/plan
 
       - name: Show what was downloaded
-        run: find reports -type f 2>/dev/null | sort || echo "(no artifacts)"
+        run: |
+          echo '--- script ---'
+          ls -l .github/scripts/ || echo "(script missing)"
+          echo '--- artifacts ---'
+          find reports -type f 2>/dev/null | sort || echo "(none)"
 
-      - name: Post or update PR comment
-        uses: actions/github-script@v7
+      - name: Render PR comment
         env:
           VALIDATE_RESULT: ${{ needs.validate.result }}
           PLAN_RESULT:     ${{ needs.plan.result }}
@@ -561,152 +623,40 @@ jobs:
           VAL_LOW:         ${{ needs.validate.outputs.low }}
           SCOPE:           ${{ needs.plan.outputs.changed_subnets }}
           RUN_URL:         ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # On a pull_request event github.sha is the ephemeral merge commit,
+          # which is not in the branch history and means nothing to a reviewer.
+          HEAD_SHA:        ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 .github/scripts/pr_comment.py \
+            --validate-dir reports/validate \
+            --plan-dir reports/plan \
+            > pr-comment.md
+          echo "--- first 40 lines ---"
+          head -40 pr-comment.md
+
+      - name: Post or update PR comment
+        uses: actions/github-script@v8
         with:
           script: |
             const fs = require('fs');
 
-            // Hidden marker used to find this comment on later runs so it is
-            // edited in place. Without it, a ten-commit PR ends up with ten
-            // near-identical comments.
+            // Must match --marker in pr_comment.py. The hidden HTML comment is
+            // how this run finds the comment left by the previous one; without
+            // it a ten-commit PR accumulates ten near-identical comments.
             const MARKER = '<!-- aci-nac-report -->';
-            const GH_COMMENT_LIMIT = 65536;
 
-            // upload-artifact v4 strips the common path prefix, so a file
-            // uploaded as aci-config/tfplan.txt may land either flattened or
-            // nested depending on what else was in the artifact.
-            const read = (...candidates) => {
-              for (const p of candidates) {
-                try {
-                  const s = fs.readFileSync(p, 'utf8');
-                  if (s.trim()) return s;
-                } catch { /* try the next candidate */ }
-              }
-              return '';
-            };
-
-            const valSummary = read('reports/validate/validate-summary.md');
-            const valRaw     = read('reports/validate/validate-all.txt');
-            const planTable  = read('reports/plan/plan-summary.md',
-                                    'reports/plan/aci-config/plan-summary.md');
-            const planRaw    = read('reports/plan/tfplan.txt',
-                                    'reports/plan/aci-config/tfplan.txt');
-
-            const valResult   = process.env.VALIDATE_RESULT || 'unknown';
-            const planResult  = process.env.PLAN_RESULT || 'skipped';
-            const planExit    = process.env.PLAN_EXITCODE || '';
-            const planLine    = process.env.PLAN_SUMMARY || 'unknown';
-            const high        = process.env.VAL_HIGH || '0';
-            const medium      = process.env.VAL_MEDIUM || '0';
-            const low         = process.env.VAL_LOW || '0';
-            const scope       = process.env.SCOPE || '';
-            const runUrl      = process.env.RUN_URL;
-
-            // ---- headline verdict -------------------------------------------
-            let verdict, next;
-            if (valResult !== 'success') {
-              verdict = '## ❌ Blocked at data model validation';
-              next = 'Fix the violations below and push again. No Terraform ' +
-                     'plan was produced, so there is nothing to review yet.';
-            } else if (planResult !== 'success') {
-              verdict = '## ❌ Validation passed, Terraform plan failed';
-              next = `Validation is clean but the plan did not complete. ` +
-                     `See the [job logs](${runUrl}).`;
-            } else if (planExit === '0') {
-              verdict = '## ✅ Validation passed · no infrastructure changes';
-              next = 'Safe to merge. The apply job will be skipped because the ' +
-                     'plan is empty.';
-            } else if (planExit === '2') {
-              verdict = '## ✅ Validation passed · changes ready to apply';
-              next = 'Merging this PR runs validation and the plan again against ' +
-                     '`main`, then holds the apply for environment approval ' +
-                     'before touching APIC.';
-            } else {
-              verdict = '## ⚠️ Plan finished in an unexpected state';
-              next = `Terraform exited ${planExit}. Review before merging.`;
+            let body;
+            try {
+              body = fs.readFileSync('pr-comment.md', 'utf8');
+            } catch (err) {
+              body = `${MARKER}\n# ACI Network as Code — change review\n\n` +
+                `⚠️ The report renderer failed (\`${err.message}\`). ` +
+                `See the [run](${process.env.RUN_URL || ''}) for job results.`;
+            }
+            if (!body.includes(MARKER)) {
+              body = `${MARKER}\n${body}`;
             }
 
-            const parts = [
-              MARKER,
-              '# ACI Network as Code — change review',
-              '',
-              verdict,
-              '',
-              '| gate | result | detail |',
-              '| --- | --- | --- |',
-              `| 1. Data model validation | ${valResult === 'success' ? '✅ passed' : '❌ failed'} | ` +
-                `${high} HIGH · ${medium} MEDIUM · ${low} LOW |`,
-              `| 2. Terraform plan | ${planResult === 'success' ? (planExit === '2' ? '⚠️ changes' : '✅ no changes') : (planResult === 'skipped' ? '⏭️ skipped' : '❌ failed')} | ` +
-                `\`${planLine}\` |`,
-              `| 3. Apply to APIC | ⏸️ on merge | requires approval |`,
-              '',
-              `**What happens next:** ${next}`,
-              '',
-              '---',
-              ''
-            ];
-
-            // ---- validation detail ------------------------------------------
-            if (valSummary.trim()) {
-              // Already rendered markdown; drop its own H1 so this comment has
-              // a single title.
-              parts.push(valSummary.replace(/^# .*\n/, '').trim());
-            } else if (valRaw.trim()) {
-              parts.push('## 1. Data model validation', '', '```text',
-                         valRaw.slice(0, 20000), '```');
-            } else {
-              parts.push('## 1. Data model validation', '',
-                         '_No validation report was produced._');
-            }
-            parts.push('', '---', '');
-
-            // ---- plan detail -------------------------------------------------
-            parts.push('## 2. Terraform plan', '');
-            if (planResult === 'skipped') {
-              parts.push('_Skipped: validation must pass first._');
-            } else {
-              parts.push('`' + planLine + '`', '');
-              if (planTable.trim()) parts.push(planTable.trim(), '');
-              parts.push('**Post-deploy test scope:** `' +
-                         (scope || 'all configured subnets (full sweep)') + '`', '');
-              if (planRaw.trim()) {
-                parts.push('<details><summary>Raw terraform plan</summary>', '',
-                           '```hcl', planRaw.trim(), '```', '</details>');
-              }
-            }
-
-            parts.push('', '---', '',
-              '<sub>Reproduce validation locally:</sub>',
-              '',
-              '```bash',
-              'nac-validate \',
-              '  -s tests-and-validations/01-pre-deploy-validation-rules/schemas/apic_schema.yaml \',
-              '  -r tests-and-validations/01-pre-deploy-validation-rules/rules/local-rules \',
-              '  -r tests-and-validations/01-pre-deploy-validation-rules/rules/pipeline-rules \',
-              '  aci-config/data',
-              '```',
-              '',
-              `<sub>[Full run and step summary](${runUrl}) · commit \`${context.sha.slice(0, 7)}\`</sub>`
-            );
-
-            let body = parts.join('\n');
-
-            // Trim the raw plan first - it is the largest and least essential
-            // block, and the verdict must survive truncation.
-            if (body.length > GH_COMMENT_LIMIT) {
-              const marker = '<details><summary>Raw terraform plan</summary>';
-              const idx = body.indexOf(marker);
-              if (idx > 0) {
-                body = body.slice(0, idx) +
-                  `_Raw plan omitted (comment size limit). See the ` +
-                  `[job summary](${runUrl})._\n`;
-              }
-            }
-            if (body.length > GH_COMMENT_LIMIT) {
-              body = body.slice(0, GH_COMMENT_LIMIT - 200) +
-                `\n\n_... truncated. See the [job summary](${runUrl})._`;
-            }
-
-            // ---- upsert ------------------------------------------------------
             const { data: comments } = await github.rest.issues.listComments({
               issue_number: context.issue.number,
               owner: context.repo.owner,
@@ -724,18 +674,36 @@ jobs:
               });
               core.info(`updated comment ${existing.id}`);
             } else {
-              await github.rest.issues.createComment({
+              const { data: created } = await github.rest.issues.createComment({
                 issue_number: context.issue.number,
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 body,
               });
-              core.info('created a new comment');
+              core.info(`created comment ${created.id}`);
             }
+
+      - name: Upload rendered comment
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-comment
+          path: pr-comment.md
+          retention-days: 5
+          if-no-files-found: warn
 
 # ══════════════════════════════════════════════════════════
   # JOB 4 — Apply + post-change verification
   # main only, blocks on required reviewers.
+  #
+  # NFS NOTE: multi-line step bodies are wrapped in `{ ... }` so bash reads the
+  # whole script before executing - see the note on the plan job. This matters
+  # most here: `terraform apply` is the longest-running command in the workflow
+  # and the most expensive to have interrupted after it has already changed the
+  # fabric.
+  #
+  # The apply step is deliberately NOT retried. A partial apply needs a human
+  # deciding what to do next, not a loop.
   # ══════════════════════════════════════════════════════════
   apply:
     name: Apply to APIC
@@ -769,11 +737,13 @@ jobs:
           COMMIT_SHA:    ${{ github.sha }}
           TRIGGERED_BY:  ${{ github.actor }}
         run: |
-          echo "Approved plan     : ${PLAN_SUMMARY:-unknown}"
-          echo "Validation        : passed (${VAL_LOW:-0} LOW findings)"
-          echo "Post-deploy scope : ${SCOPE:-full sweep}"
-          echo "Commit            : ${COMMIT_SHA}"
-          echo "Triggered by      : ${TRIGGERED_BY}"
+          {
+            echo "Approved plan     : ${PLAN_SUMMARY:-unknown}"
+            echo "Validation        : passed (${VAL_LOW:-0} LOW findings)"
+            echo "Post-deploy scope : ${SCOPE:-full sweep}"
+            echo "Commit            : ${COMMIT_SHA}"
+            echo "Triggered by      : ${TRIGGERED_BY}"
+          }
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -792,18 +762,20 @@ jobs:
       - name: Verify nac-test fabric test dependencies
         continue-on-error: true
         run: |
-          NT="$(command -v nac-test || true)"
-          PY="$(head -1 "$NT" 2>/dev/null | sed 's|^#!||' | awk '{print $1}')"
-          echo "nac-test       : ${NT:-<not found>}"
-          echo "its interpreter: ${PY:-<unknown>}"
-          if [ -x "$PY" ]; then
-            "$PY" -c "import SSHLibrary, paramiko; print('SSHLibrary', SSHLibrary.__version__, '/ paramiko', paramiko.__version__)" \
-              || echo "::warning::SSHLibrary/paramiko missing from the Robot interpreter - fabric iping tests will fail to load"
-          else
-            echo "::warning::could not resolve nac-test's interpreter - skipping import check"
-          fi
-          command -v dig  >/dev/null && dig -v 2>&1 | head -1 || echo "::warning::dig is missing - resolver tests will skip"
-          command -v ping >/dev/null && echo "ping: present"   || echo "::warning::ping is missing - client gateway tests will skip"
+          {
+            NT="$(command -v nac-test || true)"
+            PY="$(head -1 "$NT" 2>/dev/null | sed 's|^#!||' | awk '{print $1}')"
+            echo "nac-test       : ${NT:-<not found>}"
+            echo "its interpreter: ${PY:-<unknown>}"
+            if [ -x "$PY" ]; then
+              "$PY" -c "import SSHLibrary, paramiko; print('SSHLibrary', SSHLibrary.__version__, '/ paramiko', paramiko.__version__)" \
+                || echo "::warning::SSHLibrary/paramiko missing from the Robot interpreter - fabric iping tests will fail to load"
+            else
+              echo "::warning::could not resolve nac-test's interpreter - skipping import check"
+            fi
+            command -v dig  >/dev/null && dig -v 2>&1 | head -1 || echo "::warning::dig is missing - resolver tests will skip"
+            command -v ping >/dev/null && echo "ping: present"   || echo "::warning::ping is missing - client gateway tests will skip"
+          }
 
       - name: Download plan
         uses: actions/download-artifact@v4
@@ -811,16 +783,36 @@ jobs:
           name: tfplan
           path: ${{ env.WORKING_DIR }}
 
+      # The plan file is binary and tied to the provider versions and state
+      # serial from the plan job. A truncated or missing download would make
+      # apply fail in a confusing way, so check before touching the fabric.
+      - name: Verify plan artifact
+        run: |
+          {
+            if [ ! -s tfplan ]; then
+              echo "::error::tfplan is missing or empty - the plan artifact did not download. Re-run the plan job."
+              exit 1
+            fi
+            ls -l tfplan tfplan.txt plan.json
+            grep -E '^(Plan:|No changes)' tfplan.txt || true
+          }
+
       - name: Init
         run: |
-          : "${TF_STATE_CONN_STR:?TF_STATE_CONN_STR is empty}"
-          terraform init -input=false -reconfigure \
-            -backend-config="conn_str=${TF_STATE_CONN_STR}" \
-            -backend-config="schema_name=${TF_STATE_SCHEMA}"
+          {
+            : "${TF_STATE_CONN_STR:?TF_STATE_CONN_STR is empty}"
+            terraform init -input=false -reconfigure \
+              -backend-config="conn_str=${TF_STATE_CONN_STR}" \
+              -backend-config="schema_name=${TF_STATE_SCHEMA}"
+          }
         env:
           TF_STATE_CONN_STR: ${{ secrets.TF_STATE_CONN_STR }}
 
+      # Single command, deliberately. A one-line body is read by bash in one
+      # read() syscall, so there is no second read to fail part way through the
+      # longest and least-recoverable operation in the workflow.
       - name: Apply
+        id: tfapply
         run: terraform apply -input=false -auto-approve -lock-timeout=300s tfplan
         env:
           ACI_URL:      ${{ secrets.APIC_URL }}
@@ -833,26 +825,29 @@ jobs:
       # apply. Advisory only - the change is already on the fabric by this point,
       # so failing the job here would be theatre.
       - name: nac-validate (post-apply intent re-check)
+        if: always()
         continue-on-error: true
         working-directory: .
         run: |
-          SCHEMA_ARG=()
-          [ -f "${NAC_VALIDATE_SCHEMA}" ] && SCHEMA_ARG=(-s "${NAC_VALIDATE_SCHEMA}")
+          {
+            SCHEMA_ARG=()
+            [ -f "${NAC_VALIDATE_SCHEMA}" ] && SCHEMA_ARG=(-s "${NAC_VALIDATE_SCHEMA}")
 
-          set +e
-          nac-validate \
-            "${SCHEMA_ARG[@]}" \
-            -r "${NAC_VALIDATE_LOCAL_RULES}" \
-            -r "${NAC_VALIDATE_PIPELINE_RULES}" \
-            "${WORKING_DIR}/data"
-          code=$?
-          set -e
-          if [ "$code" != "0" ]; then
-            echo "::warning::post-apply validation returned ${code} - the data model changed between plan and apply"
-          else
-            echo "post-apply validation: data model still valid"
-          fi
-          exit 0
+            set +e
+            nac-validate \
+              "${SCHEMA_ARG[@]}" \
+              -r "${NAC_VALIDATE_LOCAL_RULES}" \
+              -r "${NAC_VALIDATE_PIPELINE_RULES}" \
+              "${WORKING_DIR}/data"
+            code=$?
+            set -e
+            if [ "$code" != "0" ]; then
+              echo "::warning::post-apply validation returned ${code} - the data model changed between plan and apply"
+            else
+              echo "post-apply validation: data model still valid"
+            fi
+            exit 0
+          }
 
       # ═══════════════ Post-change operational verification ═══════════════
       # SWITCH_USER / SWITCH_PASSWORD / NODE_MGMT_MAP / CHANGED_SUBNETS are
@@ -868,6 +863,7 @@ jobs:
       # bidirectional check and should gate.
       - name: nac-test - change verification
         id: nactest
+        if: always()
         continue-on-error: true
         working-directory: .
         env:
@@ -881,30 +877,31 @@ jobs:
           CHANGED_SUBNETS: ''
           PYTHONWARNINGS:  'ignore:Unverified HTTPS request'
         run: |
-          echo "node map: ${NODE_MGMT_MAP:-<EMPTY - fabric tests will skip>}"
-          [ -n "$SWITCH_USER" ] && echo "SWITCH_USER: set" \
-            || echo "::warning::SWITCH_USER is empty - fabric iping tests will skip"
-          [ -n "$NODE_MGMT_MAP" ] \
-            || echo "::warning::NODE_MGMT_MAP repo variable is not set - every fabric iping test will SKIP"
+          {
+            echo "node map: ${NODE_MGMT_MAP:-<EMPTY - fabric tests will skip>}"
+            [ -n "$SWITCH_USER" ] && echo "SWITCH_USER: set" \
+              || echo "::warning::SWITCH_USER is empty - fabric iping tests will skip"
+            [ -n "$NODE_MGMT_MAP" ] \
+              || echo "::warning::NODE_MGMT_MAP repo variable is not set - every fabric iping test will SKIP"
 
-          set +e
-          nac-test \
-            -d "${WORKING_DIR}/data" \
-            -d "${NAC_TEST_DEFAULTS}" \
-            -t "${NAC_TEST_TEMPLATES}" \
-            -f "${NAC_TEST_FILTERS}" \
-            -o nac-test-results \
-            --exclude baseline \
-            --processes 2 \
-            --minimal-reports
-          code=$?
-          set -e
-          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+            set +e
+            nac-test \
+              -d "${WORKING_DIR}/data" \
+              -d "${NAC_TEST_DEFAULTS}" \
+              -t "${NAC_TEST_TEMPLATES}" \
+              -f "${NAC_TEST_FILTERS}" \
+              -o nac-test-results \
+              --exclude baseline \
+              --processes 2 \
+              --minimal-reports
+            code=$?
+            set -e
+            echo "exitcode=$code" >> "$GITHUB_OUTPUT"
 
-          # Parse real per-test results from output.xml. Skipped tests are
-          # neither passed nor failed - count them so the summary can state how
-          # much was actually verified rather than implying full coverage.
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+            # Parse real per-test results from output.xml. Skipped tests are
+            # neither passed nor failed - count them so the summary can state how
+            # much was actually verified rather than implying full coverage.
+            python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import xml.etree.ElementTree as ET, sys
           try:
               t = ET.parse('nac-test-results/robot_results/output.xml')
@@ -920,11 +917,13 @@ jobs:
           print(f"skipped={n('SKIP')}")
           PY
 
-          echo "nac-test exit ${code}"
-          exit 0
+            echo "nac-test exit ${code}"
+            exit 0
+          }
 
       - name: nac-test - fabric baseline (informational)
         id: nactest_baseline
+        if: always()
         continue-on-error: true
         working-directory: .
         env:
@@ -936,27 +935,30 @@ jobs:
           NODE_MGMT_MAP:   ${{ vars.NODE_MGMT_MAP }}
           PYTHONWARNINGS:  'ignore:Unverified HTTPS request'
         run: |
-          set +e
-          nac-test \
-            -d "${WORKING_DIR}/data" \
-            -d "${NAC_TEST_DEFAULTS}" \
-            -t "${NAC_TEST_TEMPLATES}" \
-            -f "${NAC_TEST_FILTERS}" \
-            -o nac-test-baseline \
-            --include baseline \
-            --processes 2 \
-            --minimal-reports
-          code=$?
-          set -e
-          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
-          echo "baseline exit ${code} (informational only)"
-          exit 0
+          {
+            set +e
+            nac-test \
+              -d "${WORKING_DIR}/data" \
+              -d "${NAC_TEST_DEFAULTS}" \
+              -t "${NAC_TEST_TEMPLATES}" \
+              -f "${NAC_TEST_FILTERS}" \
+              -o nac-test-baseline \
+              --include baseline \
+              --processes 2 \
+              --minimal-reports
+            code=$?
+            set -e
+            echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+            echo "baseline exit ${code} (informational only)"
+            exit 0
+          }
 
       - name: Extract failed test detail
         if: always()
         working-directory: .
         run: |
-          python3 - <<'PY'
+          {
+            python3 - <<'PY'
           import xml.etree.ElementTree as ET, os
           from collections import defaultdict
 
@@ -1019,10 +1021,11 @@ jobs:
 
               print(f"{label:9s}: {len(rows)} failed of {ran} ran, {len(grouped)} distinct cause(s) -> {out}")
           PY
-          echo '--- change failures ---'
-          cat nac-test-failures.md 2>/dev/null || true
-          echo '--- baseline failures ---'
-          cat nac-test-baseline-failures.md 2>/dev/null || true
+            echo '--- change failures ---'
+            cat nac-test-failures.md 2>/dev/null || true
+            echo '--- baseline failures ---'
+            cat nac-test-baseline-failures.md 2>/dev/null || true
+          }
 
       - name: Upload nac-test reports
         if: always()
@@ -1048,124 +1051,129 @@ jobs:
         if: always() && github.ref == 'refs/heads/main'
         continue-on-error: true
         working-directory: .
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
-          DEST="reports/run-${{ github.run_number }}"
-          mkdir -p "gh-pages/${DEST}/robot_results"
-          mkdir -p "gh-pages/${DEST}/baseline/robot_results"
-
-          # Stop Jekyll touching anything, and make the branch root serve.
-          touch gh-pages/.nojekyll
-
-          echo '--- available nac-test HTML (pabot_results excluded) ---'
-          find nac-test-results nac-test-baseline -name '*.html' \
-            -not -path '*/pabot_results/*' 2>/dev/null | sort || true
-          echo '--------------------------------------------------------'
-
-          copied=0
-
-          # ── change-verification run ──
-          # combined_summary.html links to robot_results/*.html, so that
-          # directory structure MUST be preserved. Flat copies alone leave the
-          # dashboard's internal links 404ing. pabot_results is deliberately
-          # excluded - it is per-process scratch output and can be tens of MB.
-          if [ -f nac-test-results/combined_summary.html ]; then
-            cp nac-test-results/combined_summary.html "gh-pages/${DEST}/"
-            copied=$((copied+1))
-          fi
-
-          for f in nac-test-results/robot_results/*.html; do
-            [ -f "$f" ] || continue
-            cp "$f" "gh-pages/${DEST}/robot_results/"
-            copied=$((copied+1))
-          done
-
-          # Flat copies as well, so direct URLs and older summary links still
-          # resolve at the run root.
-          for n in report.html log.html; do
-            [ -f "nac-test-results/robot_results/$n" ] \
-              && cp "nac-test-results/robot_results/$n" "gh-pages/${DEST}/"
-          done
-
-          # xunit.xml is small and useful to external consumers.
-          [ -f nac-test-results/robot_results/xunit.xml ] \
-            && cp nac-test-results/robot_results/xunit.xml "gh-pages/${DEST}/robot_results/"
-
-          # ── informational baseline run ──
-          # Kept in its own subtree so its combined_summary.html links to its own
-          # robot_results and cannot collide with the change-verification files.
-          if [ -f nac-test-baseline/combined_summary.html ]; then
-            cp nac-test-baseline/combined_summary.html "gh-pages/${DEST}/baseline/"
-            copied=$((copied+1))
-          fi
-
-          for f in nac-test-baseline/robot_results/*.html; do
-            [ -f "$f" ] || continue
-            cp "$f" "gh-pages/${DEST}/baseline/robot_results/"
-            copied=$((copied+1))
-          done
-
-          [ -f nac-test-baseline/robot_results/report.html ] \
-            && cp nac-test-baseline/robot_results/report.html "gh-pages/${DEST}/baseline/"
-
-          # Drop the baseline tree entirely if nothing landed in it, so the
-          # published run directory does not advertise an empty folder.
-          if [ -z "$(find "gh-pages/${DEST}/baseline" -type f 2>/dev/null)" ]; then
-            rm -rf "gh-pages/${DEST}/baseline"
-            echo "no baseline HTML produced - baseline/ omitted"
-          fi
-
-          if [ "$copied" = "0" ]; then
-            echo "::warning::No nac-test HTML found - nothing to publish for ${DEST}"
-            echo "published=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # A directory with no index.html is a 404 on Pages. Prefer the combined
-          # dashboard, then the Robot report, then the flat copy.
-          if [ ! -f "gh-pages/${DEST}/index.html" ]; then
-            if   [ -f "gh-pages/${DEST}/combined_summary.html" ]; then
-              cp "gh-pages/${DEST}/combined_summary.html" "gh-pages/${DEST}/index.html"
-            elif [ -f "gh-pages/${DEST}/robot_results/report.html" ]; then
-              cp "gh-pages/${DEST}/robot_results/report.html" "gh-pages/${DEST}/index.html"
-            elif [ -f "gh-pages/${DEST}/report.html" ]; then
-              cp "gh-pages/${DEST}/report.html" "gh-pages/${DEST}/index.html"
-            fi
-          fi
-
-          # Same for the baseline subtree, so .../baseline/ is browsable.
-          if [ -d "gh-pages/${DEST}/baseline" ] && [ ! -f "gh-pages/${DEST}/baseline/index.html" ]; then
-            if   [ -f "gh-pages/${DEST}/baseline/combined_summary.html" ]; then
-              cp "gh-pages/${DEST}/baseline/combined_summary.html" "gh-pages/${DEST}/baseline/index.html"
-            elif [ -f "gh-pages/${DEST}/baseline/report.html" ]; then
-              cp "gh-pages/${DEST}/baseline/report.html" "gh-pages/${DEST}/baseline/index.html"
-            fi
-          fi
-
-          [ -f "gh-pages/${DEST}/index.html" ] \
-            && echo "published=true"  >> "$GITHUB_OUTPUT" \
-            || echo "published=false" >> "$GITHUB_OUTPUT"
-
-          # Root landing page. Regenerated each run and therefore only links the
-          # current one - the gh-pages checkout is created fresh here, so older
-          # run numbers are not enumerable. keep_files:true means older run
-          # directories persist on the branch and remain reachable by URL.
-          BASELINE_LINK=''
-          if [ -f "gh-pages/${DEST}/baseline/index.html" ]; then
-            BASELINE_LINK=" (<a href=\"${DEST}/baseline/\">baseline</a>)"
-          fi
           {
-            echo '<!doctype html><meta charset="utf-8">'
-            echo '<title>nac-webinar test reports</title>'
-            echo '<h1>ACI NaC post-deploy test reports</h1><ul>'
-            echo "<li><a href=\"${DEST}/\">run-${{ github.run_number }}</a>${BASELINE_LINK} &mdash; ${{ github.sha }}</li>"
-            echo '</ul>'
-            echo '<p>Older runs remain published at <code>reports/run-&lt;N&gt;/</code>.</p>'
-          } > gh-pages/index.html
+            DEST="reports/run-${RUN_NUMBER}"
+            mkdir -p "gh-pages/${DEST}/robot_results"
+            mkdir -p "gh-pages/${DEST}/baseline/robot_results"
 
-          echo "--- published tree for ${DEST} ---"
-          find "gh-pages/${DEST}" -type f | sort
-          echo "--- total size ---"
-          du -sh "gh-pages/${DEST}"
+            # Stop Jekyll touching anything, and make the branch root serve.
+            touch gh-pages/.nojekyll
+
+            echo '--- available nac-test HTML (pabot_results excluded) ---'
+            find nac-test-results nac-test-baseline -name '*.html' \
+              -not -path '*/pabot_results/*' 2>/dev/null | sort || true
+            echo '--------------------------------------------------------'
+
+            copied=0
+
+            # ── change-verification run ──
+            # combined_summary.html links to robot_results/*.html, so that
+            # directory structure MUST be preserved. Flat copies alone leave the
+            # dashboard's internal links 404ing. pabot_results is deliberately
+            # excluded - it is per-process scratch output and can be tens of MB.
+            if [ -f nac-test-results/combined_summary.html ]; then
+              cp nac-test-results/combined_summary.html "gh-pages/${DEST}/"
+              copied=$((copied+1))
+            fi
+
+            for f in nac-test-results/robot_results/*.html; do
+              [ -f "$f" ] || continue
+              cp "$f" "gh-pages/${DEST}/robot_results/"
+              copied=$((copied+1))
+            done
+
+            # Flat copies as well, so direct URLs and older summary links still
+            # resolve at the run root.
+            for n in report.html log.html; do
+              [ -f "nac-test-results/robot_results/$n" ] \
+                && cp "nac-test-results/robot_results/$n" "gh-pages/${DEST}/"
+            done
+
+            # xunit.xml is small and useful to external consumers.
+            [ -f nac-test-results/robot_results/xunit.xml ] \
+              && cp nac-test-results/robot_results/xunit.xml "gh-pages/${DEST}/robot_results/"
+
+            # ── informational baseline run ──
+            # Kept in its own subtree so its combined_summary.html links to its own
+            # robot_results and cannot collide with the change-verification files.
+            if [ -f nac-test-baseline/combined_summary.html ]; then
+              cp nac-test-baseline/combined_summary.html "gh-pages/${DEST}/baseline/"
+              copied=$((copied+1))
+            fi
+
+            for f in nac-test-baseline/robot_results/*.html; do
+              [ -f "$f" ] || continue
+              cp "$f" "gh-pages/${DEST}/baseline/robot_results/"
+              copied=$((copied+1))
+            done
+
+            [ -f nac-test-baseline/robot_results/report.html ] \
+              && cp nac-test-baseline/robot_results/report.html "gh-pages/${DEST}/baseline/"
+
+            # Drop the baseline tree entirely if nothing landed in it, so the
+            # published run directory does not advertise an empty folder.
+            if [ -z "$(find "gh-pages/${DEST}/baseline" -type f 2>/dev/null)" ]; then
+              rm -rf "gh-pages/${DEST}/baseline"
+              echo "no baseline HTML produced - baseline/ omitted"
+            fi
+
+            if [ "$copied" = "0" ]; then
+              echo "::warning::No nac-test HTML found - nothing to publish for ${DEST}"
+              echo "published=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            # A directory with no index.html is a 404 on Pages. Prefer the combined
+            # dashboard, then the Robot report, then the flat copy.
+            if [ ! -f "gh-pages/${DEST}/index.html" ]; then
+              if   [ -f "gh-pages/${DEST}/combined_summary.html" ]; then
+                cp "gh-pages/${DEST}/combined_summary.html" "gh-pages/${DEST}/index.html"
+              elif [ -f "gh-pages/${DEST}/robot_results/report.html" ]; then
+                cp "gh-pages/${DEST}/robot_results/report.html" "gh-pages/${DEST}/index.html"
+              elif [ -f "gh-pages/${DEST}/report.html" ]; then
+                cp "gh-pages/${DEST}/report.html" "gh-pages/${DEST}/index.html"
+              fi
+            fi
+
+            # Same for the baseline subtree, so .../baseline/ is browsable.
+            if [ -d "gh-pages/${DEST}/baseline" ] && [ ! -f "gh-pages/${DEST}/baseline/index.html" ]; then
+              if   [ -f "gh-pages/${DEST}/baseline/combined_summary.html" ]; then
+                cp "gh-pages/${DEST}/baseline/combined_summary.html" "gh-pages/${DEST}/baseline/index.html"
+              elif [ -f "gh-pages/${DEST}/baseline/report.html" ]; then
+                cp "gh-pages/${DEST}/baseline/report.html" "gh-pages/${DEST}/baseline/index.html"
+              fi
+            fi
+
+            [ -f "gh-pages/${DEST}/index.html" ] \
+              && echo "published=true"  >> "$GITHUB_OUTPUT" \
+              || echo "published=false" >> "$GITHUB_OUTPUT"
+
+            # Root landing page. Regenerated each run and therefore only links the
+            # current one - the gh-pages checkout is created fresh here, so older
+            # run numbers are not enumerable. keep_files:true means older run
+            # directories persist on the branch and remain reachable by URL.
+            BASELINE_LINK=''
+            if [ -f "gh-pages/${DEST}/baseline/index.html" ]; then
+              BASELINE_LINK=" (<a href=\"${DEST}/baseline/\">baseline</a>)"
+            fi
+            {
+              echo '<!doctype html><meta charset="utf-8">'
+              echo '<title>nac-webinar test reports</title>'
+              echo '<h1>ACI NaC post-deploy test reports</h1><ul>'
+              echo "<li><a href=\"${DEST}/\">run-${RUN_NUMBER}</a>${BASELINE_LINK} &mdash; ${COMMIT_SHA}</li>"
+              echo '</ul>'
+              echo '<p>Older runs remain published at <code>reports/run-&lt;N&gt;/</code>.</p>'
+            } > gh-pages/index.html
+
+            echo "--- published tree for ${DEST} ---"
+            find "gh-pages/${DEST}" -type f | sort
+            echo "--- total size ---"
+            du -sh "gh-pages/${DEST}"
+          }
 
       - name: Deploy to Pages
         id: deploy
@@ -1185,15 +1193,17 @@ jobs:
           PAGES_DEPLOY: ${{ steps.deploy.outcome }}
           RUN_NUMBER:   ${{ github.run_number }}
         run: |
-          URL="https://conmurphy.github.io/nac-webinar/reports/run-${RUN_NUMBER}/"
-          echo "published=${PAGES_STAGED:-n/a} deploy_outcome=${PAGES_DEPLOY:-n/a}"
-          if [ "${PAGES_STAGED:-}" != "true" ]; then
-            echo "::warning::No HTML was staged - nac-test produced no report. ${URL} will 404."
-          elif [ "${PAGES_DEPLOY:-}" != "success" ]; then
-            echo "::error::gh-pages deploy failed (${PAGES_DEPLOY:-n/a}). Check that the apply job has 'permissions: contents: write'. ${URL} will 404."
-          else
-            echo "published to ${URL} - allow ~1 min for the Pages build"
-          fi
+          {
+            URL="https://conmurphy.github.io/nac-webinar/reports/run-${RUN_NUMBER}/"
+            echo "published=${PAGES_STAGED:-n/a} deploy_outcome=${PAGES_DEPLOY:-n/a}"
+            if [ "${PAGES_STAGED:-}" != "true" ]; then
+              echo "::warning::No HTML was staged - nac-test produced no report. ${URL} will 404."
+            elif [ "${PAGES_DEPLOY:-}" != "success" ]; then
+              echo "::error::gh-pages deploy failed (${PAGES_DEPLOY:-n/a}). Check that the apply job has 'permissions: contents: write'. ${URL} will 404."
+            else
+              echo "published to ${URL} - allow ~1 min for the Pages build"
+            fi
+          }
 
       - name: Build step summary
         if: always()
@@ -1207,6 +1217,7 @@ jobs:
           PASSED:        ${{ steps.nactest.outputs.passed }}
           FAILED:        ${{ steps.nactest.outputs.failed }}
           SKIPPED:       ${{ steps.nactest.outputs.skipped }}
+          APPLY_RESULT:  ${{ steps.tfapply.outcome }}
           PLAN_SUMMARY:  ${{ needs.plan.outputs.summary }}
           VAL_LOW:       ${{ needs.validate.outputs.low }}
           PAGES_STAGED:  ${{ steps.pages.outputs.published }}
@@ -1216,79 +1227,87 @@ jobs:
           FAILURES_FILE:          nac-test-failures.md
           BASELINE_FAILURES_FILE: nac-test-baseline-failures.md
         run: |
-          set -uo pipefail
           {
-            echo '# Applied to APIC'
-            echo ''
-            echo "Plan applied: **${PLAN_SUMMARY:-unknown}**"
-            echo ''
-            echo "Pre-deploy validation: passed (${VAL_LOW:-0} LOW findings)"
-            echo ''
-            echo '---'
-            echo ''
-            echo '## 3. Post-change operational verification (nac-test)'
-            echo ''
-            echo "Fabric ICMP scope: \`all subnets in plan\`"
-            echo ''
+            set -uo pipefail
+            {
+              if [ "${APPLY_RESULT:-}" = "success" ]; then
+                echo '# Applied to APIC'
+              else
+                echo '# Apply to APIC did not complete'
+                echo ''
+                echo "⚠️ The terraform apply step reported \`${APPLY_RESULT:-unknown}\`. The fabric may be partially changed - review the apply logs before re-running."
+              fi
+              echo ''
+              echo "Plan applied: **${PLAN_SUMMARY:-unknown}**"
+              echo ''
+              echo "Pre-deploy validation: passed (${VAL_LOW:-0} LOW findings)"
+              echo ''
+              echo '---'
+              echo ''
+              echo '## 3. Post-change operational verification (nac-test)'
+              echo ''
+              echo "Fabric ICMP scope: \`all subnets in plan\`"
+              echo ''
 
-            if [ "${FAILED:-0}" = "0" ] && [ "${TOTAL:-0}" != "0" ]; then
-              echo "✅ **${PASSED:-0} of ${TOTAL:-0} operational tests passed.**"
-              echo ''
-              printf '%s\n' \
-                "- Fabric-sourced ICMP from each BD anycast gateway (iping on a border leaf, inside the tenant VRF)" \
-                "- Client reachability to those same gateways over the L3Out" \
-                "- Static path bindings and encap" \
-                "- L3Out BGP state" \
-                "- vPC state" \
-                "- Interface state" \
-                "- DNS reachability"
-            elif [ "${TOTAL:-0}" = "0" ]; then
-              echo "⚠️ **No tests ran** - check the nac-test step logs (template render, missing SSHLibrary, or credential failure)."
-            else
-              echo "❌ **${FAILED:-0} of ${TOTAL:-0} operational tests failed.** The change is applied; investigate below."
-            fi
+              if [ "${FAILED:-0}" = "0" ] && [ "${TOTAL:-0}" != "0" ]; then
+                echo "✅ **${PASSED:-0} of ${TOTAL:-0} operational tests passed.**"
+                echo ''
+                printf '%s\n' \
+                  "- Fabric-sourced ICMP from each BD anycast gateway (iping on a border leaf, inside the tenant VRF)" \
+                  "- Client reachability to those same gateways over the L3Out" \
+                  "- Static path bindings and encap" \
+                  "- L3Out BGP state" \
+                  "- vPC state" \
+                  "- Interface state" \
+                  "- DNS reachability"
+              elif [ "${TOTAL:-0}" = "0" ]; then
+                echo "⚠️ **No tests ran** - check the nac-test step logs (template render, missing SSHLibrary, or credential failure)."
+              else
+                echo "❌ **${FAILED:-0} of ${TOTAL:-0} operational tests failed.** The change is applied; investigate below."
+              fi
 
-            if [ "${SKIPPED:-0}" != "0" ]; then
-              echo ''
-              echo "ℹ️ ${SKIPPED} test(s) skipped - either outside the change scope, or NODE_MGMT_MAP / SWITCH_USER not configured."
-            fi
+              if [ "${SKIPPED:-0}" != "0" ]; then
+                echo ''
+                echo "ℹ️ ${SKIPPED} test(s) skipped - either outside the change scope, or NODE_MGMT_MAP / SWITCH_USER not configured."
+              fi
 
-            echo ''
-            echo '| result | count |'
-            echo '| --- | --- |'
-            echo "| passed | ${PASSED:-0} |"
-            echo "| failed | ${FAILED:-0} |"
-            echo "| skipped | ${SKIPPED:-0} |"
-            echo "| total | ${TOTAL:-0} |"
-            echo ''
+              echo ''
+              echo '| result | count |'
+              echo '| --- | --- |'
+              echo "| passed | ${PASSED:-0} |"
+              echo "| failed | ${FAILED:-0} |"
+              echo "| skipped | ${SKIPPED:-0} |"
+              echo "| total | ${TOTAL:-0} |"
+              echo ''
 
-            # Only advertise the Pages link if HTML was actually staged AND the
-            # push succeeded - otherwise the URL is a 404.
-            if [ "${PAGES_STAGED:-}" = "true" ] && [ "${PAGES_DEPLOY:-}" = "success" ]; then
-              echo "📊 **[Open the interactive test report](${REPORT_URL})**"
-            else
-              echo "📊 Interactive report not published (staged=${PAGES_STAGED:-n/a}, deploy=${PAGES_DEPLOY:-n/a}) - download the \`nac-test-reports\` artifact from [this run](${RUN_URL}#artifacts)."
-            fi
+              # Only advertise the Pages link if HTML was actually staged AND the
+              # push succeeded - otherwise the URL is a 404.
+              if [ "${PAGES_STAGED:-}" = "true" ] && [ "${PAGES_DEPLOY:-}" = "success" ]; then
+                echo "📊 **[Open the interactive test report](${REPORT_URL})**"
+              else
+                echo "📊 Interactive report not published (staged=${PAGES_STAGED:-n/a}, deploy=${PAGES_DEPLOY:-n/a}) - download the \`nac-test-reports\` artifact from [this run](${RUN_URL}#artifacts)."
+              fi
 
-            # Change-scope failures gate the verdict above. Not wrapped in
-            # <details>: it was always open, and h4 headings inside a details
-            # element render but lose their anchors.
-            if [ -s "${FAILURES_FILE}" ]; then
-              echo ''
-              echo '### ❌ Failed change-verification tests'
-              echo ''
-              cat "${FAILURES_FILE}"
-            fi
+              # Change-scope failures gate the verdict above. Not wrapped in
+              # <details>: it was always open, and h4 headings inside a details
+              # element render but lose their anchors.
+              if [ -s "${FAILURES_FILE}" ]; then
+                echo ''
+                echo '### ❌ Failed change-verification tests'
+                echo ''
+                cat "${FAILURES_FILE}"
+              fi
 
-            # Baseline failures are pre-existing fabric/upstream state. Kept
-            # collapsed so they never appear to contradict a green
-            # change-verification verdict.
-            if [ -s "${BASELINE_FAILURES_FILE}" ]; then
+              # Baseline failures are pre-existing fabric/upstream state. Kept
+              # collapsed so they never appear to contradict a green
+              # change-verification verdict.
+              if [ -s "${BASELINE_FAILURES_FILE}" ]; then
+                echo ''
+                echo '### Fabric baseline failures (informational)'
+                echo ''
+                cat "${BASELINE_FAILURES_FILE}"
+                echo ''
+              fi
               echo ''
-              echo '### Fabric baseline failures (informational)'
-              echo ''
-              cat "${BASELINE_FAILURES_FILE}"
-              echo ''
-            fi
-            echo ''
-          } >> "$GITHUB_STEP_SUMMARY"
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
