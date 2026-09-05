@@ -177,6 +177,29 @@ jobs:
         run: |
           find "${WORKING_DIR}/data" -type f \( -name '*.yaml' -o -name '*.yml' \) \
             | sort | sed 's|^|  |'
+      
+      # Templates are rendered through Jinja by nac-test before Robot sees them,
+      # so one malformed tag aborts the entire post-deploy suite - including
+      # tests that would have passed. Catching it here means a template defect
+      # blocks the PR rather than surfacing after terraform apply has already
+      # changed the fabric.
+      #
+      # Runs in nac-test's own interpreter, not system python3: jinja2 lives in
+      # the uv tool environment and is not importable outside it.
+      - name: Check nac-test templates render
+        run: |
+          {
+            NT="$(command -v nac-test || true)"
+            PY="$(head -1 "$NT" 2>/dev/null | sed 's|^#!||' | awk '{print $1}')"
+            if [ ! -x "${PY:-}" ]; then
+              echo "::warning::could not resolve nac-test's interpreter - skipping the template parse check. A broken template will not be caught until the post-deploy job."
+              exit 0
+            fi
+            echo "using ${PY}"
+            "$PY" "${GITHUB_WORKSPACE}/.github/scripts/check_templates.py" \
+              "${NAC_TEST_TEMPLATES}" \
+              --lint
+          }
 
       # Two passes over the same rules: text for the job log (readable, keeps
       # the rich rule context) and JSON for the step summary. Rules are pure

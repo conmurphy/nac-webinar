@@ -109,6 +109,27 @@ Count Operational Legs To Domain
     Log    node ${node} ${domain} legs: ${detail_str} (${up} up)
     RETURN    ${up}    ${detail_str}
 
+Report Interface State
+    [Documentation]    Emits the right failure for an interface that is not up.
+    ...
+    ...                adminSt is judged FIRST. When a port has been disabled,
+    ...                operSt is down as a CONSEQUENCE, and reporting the
+    ...                consequence sends the reader to the cabling rather than to
+    ...                whoever shut the port.
+    ...
+    ...                A keyword rather than inline IF/ELSE IF so the test body
+    ...                stays free of anything a Jinja block tag could join onto.
+    [Arguments]    ${node}    ${ifname}    ${bundle}    ${domain}
+    ...    ${admin}    ${oper}    ${qual}
+    ${dom}=    Convert To Upper Case    ${domain}
+    IF    "${admin}" != "up"
+        Run Keyword And Continue On Failure    Fail
+        ...    ${dom} UCS interface ${ifname} on node ${node} (${bundle}) is ADMINISTRATIVELY DOWN (adminSt=${admin}). Somebody disabled the port, or it is blacklisted out of service. Re-enable it in Fabric > Inventory, or remove the out-of-service entry. This is a config action, not a cabling fault.
+    ELSE IF    "${oper}" != "up"
+        Run Keyword And Continue On Failure    Fail
+        ...    ${dom} UCS interface ${ifname} on node ${node} (${bundle}) is configured up but operSt=${oper} (${qual}). The port is enabled and the link is not forming - check the transceiver, the cable, and the UCS fabric interconnect side.
+    END
+
 *** Test Cases ***
 {#- ══════════════════════════════════════════════════════════════════ -#}
 {#- DUPLICATED-IN: nac-validate 204_static_port_domain_coverage.py     -#}
