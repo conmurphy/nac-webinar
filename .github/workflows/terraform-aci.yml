@@ -1,4 +1,4 @@
-name: Terraform ACI
+name: NetAsCode ACI Terraform Pipeline
 
 on:
   # Every commit on a PR branch: validate + plan, never apply. The default
