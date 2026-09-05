@@ -64,9 +64,9 @@ apic:
             - name: all-services
               vrf: vrf-external
               description: all-services
-              epg_selectors:
-                - endpoint_group: 198.18.215.128_26 
-                  application_profile: network-segments
+              # epg_selectors:
+              #   - endpoint_group: 198.18.215.128_26 
+              #     application_profile: network-segments
               
               contracts:
                 providers:
