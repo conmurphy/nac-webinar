@@ -249,14 +249,27 @@ Select Fabric Node
     [Documentation]    Picks the first candidate node that has a management IP.
     ...                The anycast gateway is identical on every leaf where the
     ...                BD is deployed, so one reachable node is sufficient.
-    [Arguments]    @{candidates}
-    FOR    ${nid}    IN    @{candidates}
+    [Arguments]    ${candidates_csv}
+    @{candidates}=    Split String    ${candidates_csv}    ,
+    ${tried}=    Create List
+    FOR    ${raw}    IN    @{candidates}
+        ${nid}=    Strip String    ${raw}
+        IF    $nid == ''
+            CONTINUE
+        END
         ${ip}=    Resolve Node IP    ${nid}
+        Append To List    ${tried}    ${nid}=${ip}
         IF    $ip != ''
+            Log    selected node ${nid} (${ip}) from candidates ${candidates_csv}
             ${pair}=    Create List    ${nid}    ${ip}
             RETURN    ${pair}
         END
     END
+    # Logged as a WARN with both sides of the comparison: the previous message
+    # named only the candidates, so a key mismatch was indistinguishable from an
+    # unset NODE_MGMT_MAP.
+    ${tried_str}=    Evaluate    ", ".join($tried)
+    Log    no candidate resolved. Looked up: ${tried_str}. NODE_MGMT_MAP parsed to: ${NODE_IPS}    WARN
     ${empty}=    Create List    ${EMPTY}    ${EMPTY}
     RETURN    ${empty}
 
@@ -818,10 +831,9 @@ ICMP From Fabric Gateway {{ gw }} In {{ tenant.name }} BD {{ bd.name }} To Inter
     Skip If    {{ internal_by_design }}    {{ internal_msg }}
     Skip If    not ${SSH_CONFIGURED}
     ...    NODE_MGMT_MAP / SWITCH_USER / credential not configured - no fabric SSH target
-    @{cands}=    Create List    {{ candidates | join(' ') }}
-    ${node}=    Select Fabric Node    @{cands}
+    ${node}=    Select Fabric Node    {{ candidates | join(',') }}
     Skip If    $node[1] == ''
-    ...    None of the candidate nodes {{ candidates | join(', ') }} has an entry in NODE_MGMT_MAP
+    ...    No candidate node from {{ candidates | join(', ') }} resolved to a management IP - see the WARN in the log for the parsed NODE_MGMT_MAP contents
     Wait For Gateway To Be Deployed    ${node}[1]
     ...    {{ tenant.name }}:{{ bd.vrf }}
     ...    {{ gw }}
@@ -848,8 +860,7 @@ ICMP From Fabric Gateway {{ gw }} In {{ tenant.name }} BD {{ bd.name }} To DNS S
     Skip If    {{ internal_by_design }}    {{ internal_msg }}
     Skip If    not ${SSH_CONFIGURED}
     ...    NODE_MGMT_MAP / SWITCH_USER / credential not configured - no fabric SSH target
-    @{cands}=    Create List    {{ candidates | join(' ') }}
-    ${node}=    Select Fabric Node    @{cands}
+    ${node}=    Select Fabric Node    {{ candidates | join(',') }}
     Skip If    $node[1] == ''
     ...    None of the candidate nodes {{ candidates | join(', ') }} has an entry in NODE_MGMT_MAP
     Wait For Gateway To Be Deployed    ${node}[1]
