@@ -610,14 +610,14 @@ jobs:
       # or failed before uploading. The report degrades instead of failing.
       - name: Download validation report
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: nac-validate
           path: reports/validate
 
       - name: Download plan report
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: tfplan
           path: reports/plan
@@ -765,7 +765,7 @@ jobs:
         run: terraform version
 
       - name: Download plan
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: tfplan
           path: ${{ env.WORKING_DIR }}
