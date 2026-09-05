@@ -104,6 +104,32 @@ ${USE_KEY_AUTH}           ${False}
 &{SSH_POOL}
 ${SSH_OPEN_COUNT}         ${0}
 
+# ─── post-apply convergence ───
+# nac-test runs seconds after terraform apply. ACI programs the pervasive SVI
+# asynchronously, so a fabric-sourced ping can reach the leaf before the gateway
+# exists there - iping then rejects -S with "% Invalid source address". These
+# bound how long a gateway is given to appear before that becomes a finding.
+${SVI_SETTLE_TIMEOUT}     %{SVI_SETTLE_TIMEOUT=90s}
+${SVI_SETTLE_INTERVAL}    %{SVI_SETTLE_INTERVAL=5s}
+
+# Tokens meaning the SOURCE is not a local address on this leaf yet. Checked
+# BEFORE the hard-error list so a convergence delay is never reported as a
+# credential or VRF fault.
+@{IPING_SOURCE_NOT_READY}    invalid source    invalid src    bad source
+
+# "switch_ip|gw" -> True once the gateway has been confirmed deployed in this
+# process, so the probe is paid once per leaf/gateway rather than per test.
+&{SVI_READY}
+
+# Runner-to-gateway ICMP retry window. Deliberately SHORTER than
+# SVI_SETTLE_TIMEOUT: the fabric-sourced tests already absorbed convergence by
+# the time this runs, so this only needs to cover the extra moments between the
+# SVI appearing on the leaf and the route being usable from outside the fabric.
+# A genuinely unreachable gateway must fail in seconds, not minutes - it is the
+# finding most likely to be real.
+${GW_PING_SETTLE_TIMEOUT}     %{GW_PING_SETTLE_TIMEOUT=45s}
+${GW_PING_SETTLE_INTERVAL}    %{GW_PING_SETTLE_INTERVAL=5s}
+
 *** Keywords ***
 Probe Runner Capabilities
     [Documentation]    Establishes once, at suite level, what this container can
@@ -413,8 +439,8 @@ Fabric Ping
     ...                A session that cannot be established returns an SSH-ERROR
     ...                string rather than raising, so the caller reports a
     ...                specific assertion instead of an opaque library error.
-    [Arguments]    ${switch_ip}    ${vrf}    ${dest}    ${source}=${EMPTY}
-    ${cmd}=    Set Variable    iping -V ${vrf} -c ${PING_COUNT}
+    [Arguments]    ${switch_ip}    ${vrf}    ${dest}    ${source}=${EMPTY}    ${count}=${PING_COUNT}
+    ${cmd}=    Set Variable    iping -V ${vrf} -c ${count}
     IF    $source != ''
         ${cmd}=    Set Variable    ${cmd} -S ${source}
     END
@@ -489,10 +515,10 @@ Count Ping Replies
 
 Fabric Ping Should Succeed
     [Documentation]    Asserts at least one ICMP reply by parsing output rather
-    ...                than trusting an exit code. Distinguishes three outcomes:
-    ...                the command was rejected, the harness captured nothing, or
-    ...                the ping genuinely lost every packet. Only the last is a
-    ...                fabric finding.
+    ...                than trusting an exit code. Distinguishes four outcomes:
+    ...                the source is not deployed yet, the command was rejected,
+    ...                the harness captured nothing, or the ping genuinely lost
+    ...                every packet. Only the last is a fabric routing finding.
     ...
     ...                'no route to host' is deliberately NOT in the did-not-run
     ...                token list. Every other token there means iping never
@@ -501,20 +527,34 @@ Fabric Ping Should Succeed
     ...                finding this suite can produce. It must fall through to the
     ...                total-loss branch so the message names the real cause.
     [Arguments]    ${switch_ip}    ${vrf}    ${dest}    ${source}=${EMPTY}    ${label}=${EMPTY}
-    ${out}=    Fabric Ping    ${switch_ip}    ${vrf}    ${dest}    ${source}
+    ${out}=      Fabric Ping              ${switch_ip}    ${vrf}    ${dest}    ${source}
     ${lower}=    Convert To Lower Case    ${out}
+
+    # Checked BEFORE the hard-error list. "% Invalid source address" would
+    # otherwise match '% invalid' and be reported as a credential or VRF fault,
+    # which sends the reader looking in entirely the wrong place. Reaching here
+    # after Wait For Gateway To Be Deployed means the SVI genuinely is not
+    # programmed, not that the fabric simply had not caught up.
+    ${not_ready}=    Source Is Not Yet Deployed    ${out}
+    IF    ${not_ready}
+        Run Keyword And Continue On Failure    Fail
+        ...    ${label}: ${source} is not a local address on ${switch_ip}, so iping refused to send. The pervasive SVI for this gateway is not deployed on that leaf - the BD needs an EPG with an OPERATIONAL static path there, so check the UCS domain interfaces on this node. Output: ${out}
+        RETURN
+    END
+
     FOR    ${bad}    IN    ssh-error    authentication    permission denied
-    ...    unknown vrf    no such vrf    cannot find    bad source
+    ...    unknown vrf    no such vrf    cannot find
     ...    % invalid    syntax error
         # $bad / $lower, not '${bad}' in '''${lower}''' - the latter injects the
         # full multi-line output into the expression source and raises
         # SyntaxError: unterminated string literal.
         IF    $bad in $lower
             Run Keyword And Continue On Failure    Fail
-            ...    ${label}: iping did not run on ${switch_ip} ("${bad}") - check that VRF ${vrf} exists, that source ${source} is deployed on this leaf, and that the SSH credential is valid. Output: ${out}
+            ...    ${label}: iping did not run on ${switch_ip} ("${bad}") - check that VRF ${vrf} exists and that the SSH credential is valid. Output: ${out}
             RETURN
         END
     END
+
     ${received}=    Count Ping Replies    ${out}
     IF    ${received} < 0
         Run Keyword And Continue On Failure    Fail
@@ -585,6 +625,77 @@ Fail If
     IF    ${condition}
         Fail    ${message}
     END
+
+Source Is Not Yet Deployed
+    [Documentation]    True when iping rejected the -S address because it is not
+    ...                a local interface on this leaf. Distinct from the hard
+    ...                error list: this one clears itself once ACI finishes
+    ...                programming the pervasive SVI.
+    [Arguments]    ${out}
+    ${lower}=    Convert To Lower Case    ${out}
+    FOR    ${tok}    IN    @{IPING_SOURCE_NOT_READY}
+        IF    $tok in $lower
+            RETURN    ${True}
+        END
+    END
+    RETURN    ${False}
+
+Gateway Should Be Accepted As Source
+    [Documentation]    One cheap probe: does this leaf accept the gateway as an
+    ...                iping source? Only the -S validation matters, so the
+    ...                destination is the gateway itself and whether the ping
+    ...                actually replies is irrelevant - a single count keeps it
+    ...                to roughly a second on a pooled session.
+    [Arguments]    ${switch_ip}    ${vrf}    ${source}
+    ${out}=    Fabric Ping    ${switch_ip}    ${vrf}    ${source}    ${source}    count=1
+    ${not_ready}=    Source Is Not Yet Deployed    ${out}
+    IF    ${not_ready}
+        Fail    ${source} is not accepted as an iping source on ${switch_ip} - the pervasive SVI is not programmed on that leaf. If this persists, confirm the BD is deployed there: that requires an EPG with an OPERATIONAL static path, so a down vPC on this leaf will prevent it.
+    END
+
+Wait For Gateway To Be Deployed
+    [Documentation]    Blocks until the BD anycast gateway is usable as an iping
+    ...                source on this leaf, or SVI_SETTLE_TIMEOUT elapses.
+    ...
+    ...                Exists because nac-test runs seconds after terraform
+    ...                apply. Without it the first fabric-sourced test for a new
+    ...                subnet fails on "% Invalid source address" while every
+    ...                later test on the same gateway passes - a race that looks
+    ...                exactly like a real fabric fault in the report.
+    ...
+    ...                Deliberately NOT a blanket retry around the assertion: a
+    ...                genuine total-loss result must fail immediately rather
+    ...                than being retried for the full window.
+    [Arguments]    ${switch_ip}    ${vrf}    ${source}
+    ${key}=      Set Variable    ${switch_ip}|${source}
+    ${known}=    Evaluate        $SVI_READY.get($key, False)
+    IF    ${known}
+        RETURN
+    END
+    Wait Until Keyword Succeeds    ${SVI_SETTLE_TIMEOUT}    ${SVI_SETTLE_INTERVAL}
+    ...    Gateway Should Be Accepted As Source    ${switch_ip}    ${vrf}    ${source}
+    Set To Dictionary    ${SVI_READY}    ${key}    ${True}
+    Log    ${source} confirmed deployed on ${switch_ip}
+
+Client Ping Should Reach Gateway
+    [Documentation]    One ping attempt from the runner, RAISING on failure so
+    ...                Wait Until Keyword Succeeds can retry it.
+    ...
+    ...                Split out from the test body for exactly that reason:
+    ...                Wait Until Keyword Succeeds needs a keyword that fails,
+    ...                and the inline Run Process / IF form never raised.
+    ...
+    ...                The message is terse because the caller replaces it with
+    ...                a contextual one - this text only ever surfaces inside the
+    ...                retry log.
+    [Arguments]    ${gw}
+    ${result}=    Run Process    ping    -c    3    -W    2    ${gw}
+    ...    stdout=PIPE    stderr=PIPE    timeout=20s    on_timeout=terminate
+    Log    ${result.stdout}${result.stderr}
+    IF    ${result.rc} != 0
+        Fail    ping ${gw} rc=${result.rc}: ${result.stdout}
+    END
+    RETURN    ${result.stdout}
 
 *** Test Cases ***
 {#- ══════════════════════════════════════════════════════════════════ -#}
@@ -707,10 +818,13 @@ ICMP From Fabric Gateway {{ gw }} In {{ tenant.name }} BD {{ bd.name }} To Inter
     Skip If    {{ internal_by_design }}    {{ internal_msg }}
     Skip If    not ${SSH_CONFIGURED}
     ...    NODE_MGMT_MAP / SWITCH_USER / credential not configured - no fabric SSH target
-    @{cands}=    Create List    {{ candidates | join('    ') }}
+    @{cands}=    Create List    {{ candidates | join(' ') }}
     ${node}=    Select Fabric Node    @{cands}
     Skip If    $node[1] == ''
     ...    None of the candidate nodes {{ candidates | join(', ') }} has an entry in NODE_MGMT_MAP
+    Wait For Gateway To Be Deployed    ${node}[1]
+    ...    {{ tenant.name }}:{{ bd.vrf }}
+    ...    {{ gw }}
     Fabric Ping Should Succeed    ${node}[1]
     ...    {{ tenant.name }}:{{ bd.vrf }}
     ...    ${FABRIC_EXT_TARGET}
@@ -734,10 +848,13 @@ ICMP From Fabric Gateway {{ gw }} In {{ tenant.name }} BD {{ bd.name }} To DNS S
     Skip If    {{ internal_by_design }}    {{ internal_msg }}
     Skip If    not ${SSH_CONFIGURED}
     ...    NODE_MGMT_MAP / SWITCH_USER / credential not configured - no fabric SSH target
-    @{cands}=    Create List    {{ candidates | join('    ') }}
+    @{cands}=    Create List    {{ candidates | join(' ') }}
     ${node}=    Select Fabric Node    @{cands}
     Skip If    $node[1] == ''
     ...    None of the candidate nodes {{ candidates | join(', ') }} has an entry in NODE_MGMT_MAP
+    Wait For Gateway To Be Deployed    ${node}[1]
+    ...    {{ tenant.name }}:{{ bd.vrf }}
+    ...    {{ gw }}
     FOR    ${srv}    IN    @{DNS_SERVERS}
         Fabric Ping Should Succeed    ${node}[1]
         ...    {{ tenant.name }}:{{ bd.vrf }}
@@ -759,6 +876,14 @@ ICMP From Client To Gateway {{ gw }} In {{ tenant.name }} BD {{ bd.name }}
     ...                at external route advertisement or the contract on the
     ...                external EPG, not at the BD itself.
     ...
+    ...                RETRIED, for the same reason the fabric-sourced tests
+    ...                wait for the SVI. Two things must converge after apply
+    ...                before this can pass: the pervasive SVI has to exist on a
+    ...                leaf, and {{ subnet.ip }} has to be advertised out
+    ...                {{ l3out_list }} and learned upstream. A single attempt
+    ...                seconds after apply can fail on either, and the failure
+    ...                message would wrongly accuse the L3Out configuration.
+    ...
     ...                Data model at render time: public={{ is_public }},
     ...                l3outs={{ l3out_list }}.
     [Tags]    client-icmp    l3out-north-south    icmp
@@ -770,12 +895,18 @@ ICMP From Client To Gateway {{ gw }} In {{ tenant.name }} BD {{ bd.name }}
     Skip If    not ${GATEWAY_PING_ENABLED}
     ...    GATEWAY_PING_ENABLED is False for this environment
     Skip If    not ${ICMP_AVAILABLE}    ${ICMP_REASON}
-    ${result}=    Run Process    ping    -c    3    -W    2    {{ gw }}
-    ...    stdout=PIPE    stderr=PIPE    timeout=20s    on_timeout=terminate
-    Log    ${result.stdout}${result.stderr}
-    IF    ${result.rc} != 0
+    # Run Keyword And Ignore Error around the wait, rather than letting the wait
+    # fail directly: Wait Until Keyword Succeeds reports only the inner keyword's
+    # last failure, which loses the subnet, BD and L3Out context that makes the
+    # finding actionable. Capturing it lets the real message be emitted below.
+    ${status}    ${detail}=    Run Keyword And Ignore Error
+    ...    Wait Until Keyword Succeeds    ${GW_PING_SETTLE_TIMEOUT}    ${GW_PING_SETTLE_INTERVAL}
+    ...    Client Ping Should Reach Gateway    {{ gw }}
+    IF    $status != 'PASS'
         Run Keyword And Continue On Failure    Fail
-        ...    Gateway {{ gw }} ({{ bd.name }}, {{ subnet.ip }}) is not reachable from the runner via the L3Out (rc=${result.rc}): ${result.stdout}
+        ...    Gateway {{ gw }} ({{ bd.name }}, {{ subnet.ip }}) never became reachable from the runner within ${GW_PING_SETTLE_TIMEOUT}. The fabric-sourced test for this gateway passing while this one fails narrows it to the north-south path: check that {{ subnet.ip }} is advertised out {{ l3out_list }}, that the external EPG provides a contract permitting ICMP, and that the upstream router has learned the prefix. Last attempt: ${detail}
+    ELSE
+        Log    Gateway {{ gw }} reachable from the runner: ${detail}
     END
 
 {%-     endif %}

@@ -29,11 +29,18 @@ Verify Node {{ node.id }} Interface {{ ifname }} Is Up
 {% endfor %}
 
 Verify No Configured Interface Is Down Due To Error
-    [Documentation]    Catches error-disabled / SFP / link-flap conditions across
-    ...                the fabric that a per-interface loop might miss.
+    [Documentation]    Fabric-wide sweep for interfaces that are down.
+    ...
+    ...                Reports admin-down SEPARATELY rather than excluding it.
+    ...                The previous filter excluded admin-down entirely, so a
+    ...                deliberately disabled port produced a PASS - technically
+    ...                correct, but it meant nothing in this suite could ever
+    ...                see one.
     ${r}=    GET On Session    apic
     ...    /api/node/class/ethpmPhysIf.json
-    ...    params=query-target-filter=and(eq(ethpmPhysIf.operSt,"down"),ne(ethpmPhysIf.operStQual,"admin-down"))
-    Set Suite Variable    $r    ${r.json()}
-    ${count}=    Get Value From Json    ${r}    $.totalCount
-    Run Keyword If    ${count}[0] > 0    Log    ${count}[0] interface(s) down for non-admin reasons    WARN
+    ...    params=query-target-filter=eq(ethpmPhysIf.operSt,"down")
+    ${j}=    Set Variable    ${r.json()}
+    ${count}=    Get Value From Json    ${j}    $.totalCount
+    IF    ${count}[0] > 0
+        Log    ${count}[0] interface(s) down fabric-wide - see ucs_domain_interfaces for the UCS-facing ones, which are the ones that affect BD deployment    WARN
+    END
