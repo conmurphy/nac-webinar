@@ -178,27 +178,62 @@ jobs:
           find "${WORKING_DIR}/data" -type f \( -name '*.yaml' -o -name '*.yml' \) \
             | sort | sed 's|^|  |'
       
-      # Templates are rendered through Jinja by nac-test before Robot sees them,
-      # so one malformed tag aborts the entire post-deploy suite - including
-      # tests that would have passed. Catching it here means a template defect
-      # blocks the PR rather than surfacing after terraform apply has already
-      # changed the fabric.
-      #
-      # Runs in nac-test's own interpreter, not system python3: jinja2 lives in
-      # the uv tool environment and is not importable outside it.
+      # Jinja-level check. Fast, per-file, and annotates the PR diff with a line
+      # number. Also runs a heuristic lint for the whitespace-join defect, which
+      # the Robot dry run below CANNOT see: a joined line is often still a valid
+      # keyword call with an extra argument, so it resolves cleanly and fails only
+      # at execution time.
       - name: Check nac-test templates render
         run: |
           {
             NT="$(command -v nac-test || true)"
             PY="$(head -1 "$NT" 2>/dev/null | sed 's|^#!||' | awk '{print $1}')"
             if [ ! -x "${PY:-}" ]; then
-              echo "::warning::could not resolve nac-test's interpreter - skipping the template parse check. A broken template will not be caught until the post-deploy job."
+              echo "::warning::could not resolve nac-test's interpreter - skipping the template parse check"
               exit 0
             fi
             echo "using ${PY}"
             "$PY" "${GITHUB_WORKSPACE}/.github/scripts/check_templates.py" \
               "${NAC_TEST_TEMPLATES}" \
               --lint
+          }
+
+      # Robot-level check. --dry-run renders the templates and then resolves every
+      # keyword and argument count WITHOUT executing anything, so it catches the
+      # class the Jinja check cannot: a keyword that does not exist, or is called
+      # with the wrong number of arguments.
+      - name: Dry-run nac-test suites
+        run: |
+          {
+            set +e
+            nac-test \
+              -d "${WORKING_DIR}/data" \
+              -d "${NAC_TEST_DEFAULTS}" \
+              -t "${NAC_TEST_TEMPLATES}" \
+              -f "${NAC_TEST_FILTERS}" \
+              -o nac-test-dryrun \
+              --dry-run \
+              > dryrun.out 2> dryrun.err
+            code=$?
+            set -e
+
+            cat dryrun.out || true
+            cat dryrun.err || true
+
+            # Belt and braces: a non-zero exit is the primary signal, but grep the
+            # combined output for the two failure texts that matter most, in case
+            # a future version reports them without failing.
+            cat dryrun.out dryrun.err > dryrun-all.txt 2>/dev/null || true
+            if grep -qiE "no keyword with name|keyword .* expected .* argument" dryrun-all.txt; then
+              echo "::error::a test references a keyword that does not exist, or calls one with the wrong arguments. Every test in that suite would fail at execution time with a message that looks like a fabric finding."
+              exit 1
+            fi
+
+            if [ "$code" != "0" ]; then
+              echo "::error::nac-test --dry-run exited ${code} - the post-deploy suite would not execute correctly. Fix this before the change reaches the fabric."
+              exit "$code"
+            fi
+            echo "all suites resolve: templates render and every keyword exists"
           }
 
       # Two passes over the same rules: text for the job log (readable, keeps
@@ -324,6 +359,9 @@ jobs:
             validate.json
             validate-all.txt
             validate-summary.md
+            dryrun.out
+            dryrun.err
+            dryrun-all.txt
           retention-days: 5
           if-no-files-found: warn
 
