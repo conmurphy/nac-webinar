@@ -94,7 +94,7 @@ jobs:
     name: Lint workflows
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Nothing here pushes via the checkout credentials - the gh-pages
           # deploy uses its own github_token input. Self-hosted runners keep
@@ -148,7 +148,7 @@ jobs:
       low:      ${{ steps.validate.outputs.low }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -336,7 +336,7 @@ jobs:
       changed_bds:     ${{ steps.changed.outputs.bds }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -600,7 +600,7 @@ jobs:
       # workspace by default, so checking out afterwards would delete them.
       # Sparse checkout because only the renderer is needed here.
       - name: Checkout report script
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
           sparse-checkout: .github/scripts
@@ -754,7 +754,7 @@ jobs:
           }
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -916,7 +916,7 @@ jobs:
           }
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
