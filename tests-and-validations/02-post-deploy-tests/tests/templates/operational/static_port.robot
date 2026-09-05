@@ -94,7 +94,7 @@ Relation State Should Not Be Missing Target
 {% set epg_name = epg.name ~ defaults.apic.tenants.application_profiles.endpoint_groups.name_suffix %}
 
 {% if epg.static_ports is defined %}
-Verify EPG {{ epg_name }} Deployed Path Count
+Verify The Deployed Path Count For EPG {{ epg_name }}
     [Documentation]    Every configured static path must resolve to a deployed
     ...                path. A missing path means that UCS domain has no
     ...                connectivity for this segment.
@@ -139,7 +139,7 @@ Verify EPG {{ epg_name }} Deployed Path Count
 {%- endif %}
 {%- if pathep != "" %}
 
-Verify EPG {{ epg_name }} Path {{ pathep }} VLAN {{ sp.vlan }} Deployed
+Verify EPG {{ epg_name }} Path {{ pathep }} VLAN {{ sp.vlan }} Is Deployed
     [Documentation]    Static path {{ path_dn }}
     ...                on EPG {{ epg_name }}, encap vlan-{{ sp.vlan }}.
     ...

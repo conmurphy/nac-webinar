@@ -221,7 +221,7 @@ Verify {{ domain | upper }} UCS Interface {{ ifname }} On Node {{ node }} Is Up
 {%- set ifname_csv = bundles.values() | map('regex_replace', '^', 'eth') | join(',') %}
 {%- for node in ucs_leaf_nodes %}
 
-Verify Node {{ node }} Retains A Path To The {{ domain | upper }} UCS Domain
+Verify Node {{ node }} Has A Path To The {{ domain | upper }} UCS Domain
     [Documentation]    Fails only when EVERY leg from leaf {{ node }} to the
     ...                {{ domain }} UCS domain is down.
     ...

@@ -28,7 +28,7 @@ Verify Node {{ node.id }} Interface {{ ifname }} Is Up
 {% endfor %}
 {% endfor %}
 
-Verify No Configured Interface Is Down Due To Error
+Verify No Configured Interface Is Down Due To Error 
     [Documentation]    Fabric-wide sweep for interfaces that are down.
     ...
     ...                Reports admin-down SEPARATELY rather than excluding it.

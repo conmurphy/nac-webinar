@@ -42,7 +42,7 @@ Verify Node {{ switch.node_id }} vPC Domain {{ group.id }} Peer State
 {% if sp.channel is defined and sp.channel not in seen %}
 {% set _ = seen.append(sp.channel) %}
 
-Verify vPC Bundle {{ sp.channel }} Is Up On Both Peers
+Verify vPC {{ sp.channel }} Is Up On Both Peers
     [Documentation]    Queried by name so both leaf entries are returned.
     ...                localOperSt/remoteOperSt must be up on both, and no
     ...                VLANs may be suspended by consistency check.

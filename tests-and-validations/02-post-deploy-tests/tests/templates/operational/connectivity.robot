@@ -953,7 +953,7 @@ Fabric Nodes Reach DNS In Management VRF
 # ══════════════════════════════════════════════════════════════════
 # RUNNER-SIDE shared services and egress
 # ══════════════════════════════════════════════════════════════════
-Verify DHCP Server Is Reachable
+Verify DHCP Server Is Reachable From Fabric
     [Documentation]    TCP-based reachability so it works without NET_RAW.
     ...                Port 53 is used because the DHCP relay provider
     ...                (dhcp.emea-se.dcloud.cisco.com) also serves DNS here.
@@ -981,12 +981,9 @@ Verify DNS Servers Answer Queries
         ...    Resolvers returned no A record for ${DNS_PROBE_NAME}: ${silent}
     END
 
-Verify DNS Servers Agree Or Both Fail
+Verify DNS Servers Are Reachable from Fabric
     [Documentation]    A resolver answering while its peer does not is a real
-    ...                signal and fails. Differing ADDRESSES for the same name
-    ...                are NOT a failure - CDN and round-robin records
-    ...                legitimately differ per resolver - so divergence is
-    ...                logged as a warning.
+    ...                signal and fails. 
     Skip If    not ${DIG_AVAILABLE}    dig is not installed in the runner image
     ${answers}=    Create List
     ${silent}=     Create List

@@ -29,7 +29,7 @@ Resource        ../../apic_common.resource
 {% set peer_prefix = peer.ip if '/' in peer.ip else peer.ip ~ '/32' %}
 {% for node in node_list %}
 
-Verify L3out {{ l3out_name }} BGP Peer {{ peer_prefix }} Node {{ node }} Interface {{ if_idx }}
+Verify Established Session For L3out {{ l3out_name }} BGP Peer {{ peer_prefix }} Node {{ node }} Interface {{ if_idx }}
     [Documentation]    VRF {{ tenant.name }}:{{ vrf_name }}. Asserts at least one
     ...                established session under peer-[{{ peer_prefix }}].
     ...                Works for static peers and dynamic listen ranges alike.
