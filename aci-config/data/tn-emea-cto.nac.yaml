@@ -8,12 +8,14 @@ apic:
 
       vrfs:
         - name: vrf-external
-                  
+
       bridge_domains: 
         - name: 198.18.215.128_26 
+          alias: conmurph-app-01-web
+          description: this is conmurphs web service for application 01
           vrf: vrf-external
           subnets:
-          - ip: 198.18.21.129/26
+          - ip: 198.18.215.129/26
             public: true
           l3outs:
           - l3out-to-core-01
@@ -41,16 +43,16 @@ apic:
                   channel: vpc-ucs-prod-01-6454-B
                   vlan: 1230
                   deployment_immediacy: immediate 
-                - node_id: 1101
-                  node2_id: 1102
-                  channel: vpc-ucs-test-01-6536-A
-                  vlan: 1230
-                  deployment_immediacy: immediate
-                - node_id: 1101
-                  node2_id: 1102
-                  channel: vpc-ucs-test-01-6536-B
-                  vlan: 1230
-                  deployment_immediacy: immediate
+                # - node_id: 1101
+                #   node2_id: 1102
+                #   channel: vpc-ucs-test-01-6536-A
+                #   vlan: 1230
+                #   deployment_immediacy: immediate
+                # - node_id: 1101
+                #   node2_id: 1102
+                #   channel: vpc-ucs-test-01-6536-B
+                #   vlan: 1230
+                #   deployment_immediacy: immediate
 
         - name: security-groups
           alias: security-groups
