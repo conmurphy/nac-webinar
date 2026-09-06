@@ -8,19 +8,15 @@ apic:
 
       vrfs:
         - name: vrf-external
-        # - name: vrf-external 
-          
-      # bridge_domains:
-      #   - name: 198.18.215.128_26 
-      #     alias: app-02-web
-      #     description: this is the application-02 web server subnet
-      #     vrf: vrf-external
-      #     subnets:
-      #     - ip: 198.18.215.129/26
-      #       public: true
-      #     l3outs:
-      #     - l3out-to-core-01
-
+                  
+      bridge_domains: 
+        - name: 198.18.215.128_26 
+          vrf: vrf-external
+          subnets:
+          - ip: 198.18.21.129/26
+            public: true
+          l3outs:
+          - l3out-to-core-01
 
       application_profiles:
 
@@ -28,33 +24,33 @@ apic:
           alias: network-segments
           description: these are for our subnets
           managed: false
-          # endpoint_groups: 
-          #   - name: 198.18.215.128_26 
-          #     bridge_domain: 198.18.215.128_26 
-          #     alias: app-02-web
-          #     physical_domains:
-          #       - emea-cto.phys-dom
-          #     static_ports:
-          #       - node_id: 1101
-          #         node2_id: 1102
-          #         channel: vpc-ucs-prod-01-6454-A
-          #         vlan: 1230
-          #         deployment_immediacy: immediate
-          #       - node_id: 1101
-          #         node2_id: 1102
-          #         channel: vpc-ucs-prod-01-6454-B
-          #         vlan: 1230
-          #         deployment_immediacy: immediate 
-                # - node_id: 1101
-                #   node2_id: 1102
-                #   channel: vpc-ucs-test-01-6536-A
-                #   vlan: 1230
-                #   deployment_immediacy: immediate
-                # - node_id: 1101
-                #   node2_id: 1102
-                #   channel: vpc-ucs-test-01-6536-B
-                #   vlan: 1230
-                #   deployment_immediacy: immediate
+          endpoint_groups: 
+            - name: 198.18.215.128_26 
+              bridge_domain: 198.18.215.128_26 
+              alias: app-02-web
+              physical_domains:
+                - emea-cto.phys-dom
+              static_ports:
+                - node_id: 1101
+                  node2_id: 1102
+                  channel: vpc-ucs-prod-01-6454-A
+                  vlan: 1230
+                  deployment_immediacy: immediate
+                - node_id: 1101
+                  node2_id: 1102
+                  channel: vpc-ucs-prod-01-6454-B
+                  vlan: 1230
+                  deployment_immediacy: immediate 
+                - node_id: 1101
+                  node2_id: 1102
+                  channel: vpc-ucs-test-01-6536-A
+                  vlan: 1230
+                  deployment_immediacy: immediate
+                - node_id: 1101
+                  node2_id: 1102
+                  channel: vpc-ucs-test-01-6536-B
+                  vlan: 1230
+                  deployment_immediacy: immediate
 
         - name: security-groups
           alias: security-groups
@@ -64,9 +60,9 @@ apic:
             - name: all-services
               vrf: vrf-external
               description: all-services
-              # epg_selectors:
-              #   - endpoint_group: 198.18.215.128_26 
-              #     application_profile: network-segments
+              epg_selectors:
+                - endpoint_group: 198.18.215.128_26 
+                  application_profile: network-segments
               
               contracts:
                 providers:
