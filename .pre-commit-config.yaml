@@ -1,0 +1,19 @@
+repos:
+  - repo: local
+    hooks:
+      - id: nac-validate-local
+        name: nac-validate (local tier)
+        entry: >
+          nac-validate
+          -s tests-and-validations/01-pre-deploy-validation-rules/schemas/apic_schema.yaml
+          -r tests-and-validations/01-pre-deploy-validation-rules/rules/local-rules
+          --non-strict
+          aci-config/data
+        language: system
+        pass_filenames: false
+        files: >
+          (?x)^(
+            aci-config/data/.*\.(yaml|yml)|
+            tests-and-validations/01-pre-deploy-validation-rules/rules/local-rules/.*\.py|
+            tests-and-validations/01-pre-deploy-validation-rules/schemas/.*\.yaml
+          )$
